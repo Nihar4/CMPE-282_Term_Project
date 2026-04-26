@@ -1,11 +1,14 @@
 # Serverless Squad — CMPE-282 Term Project
 
-| Member                                  | Role(s)                                                          |
-| --------------------------------------- | ---------------------------------------------------------------- |
-| **Aditya Govind Shahari**               | Frontend & UX, AI integration, demo lead                         |
-| **Mohsen Minai**                        | Backend services (Go), security, CORS / JWT / IAM                |
-| **Nihar Dharmeshkumar Patel**           | Cloud architecture, GCP / Terraform / Kubernetes, CI/CD         |
-| **Tamizh Selvan Manivannan**            | Data engineering, parser-service (Python), analytics             |
+| Member                                  | GitHub                          | Role(s)                                                          |
+| --------------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
+| **Aditya Govind Shahari**               | [@adityashahari1][a]            | Frontend & UX, AI integration, demo lead                         |
+| **Mohsen Minai**                        | _pending — share GitHub handle_ | Backend services (Go), security, CORS / JWT / IAM                |
+| **Nihar Dharmeshkumar Patel**           | [@Nihar4][n]                    | Cloud architecture, GCP / Terraform / Kubernetes, CI/CD          |
+| **Tamizh Selvan Manivannan**            | _pending — share GitHub handle_ | Data engineering, parser-service (Python), analytics             |
+
+[a]: https://github.com/adityashahari1
+[n]: https://github.com/Nihar4
 
 > **Group**: Serverless Squad — 4 students.
 > **Course**: CMPE-282 (Cloud Technologies) — Spring 2026.
