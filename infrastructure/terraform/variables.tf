@@ -126,3 +126,21 @@ variable "jenkins_iap_members" {
   type        = list(string)
   default     = ["allAuthenticatedUsers"]
 }
+
+variable "github_owner" {
+  description = "GitHub org / user that owns the repo (for Cloud Build trigger)"
+  type        = string
+  default     = "Nihar4"
+}
+
+variable "github_repo" {
+  description = "GitHub repository name (for Cloud Build trigger)"
+  type        = string
+  default     = "CMPE-282_Term_Project"
+}
+
+variable "deploy_serverless" {
+  description = "Set false to skip Cloud Run / Functions / Tasks etc. (e.g. on first apply)"
+  type        = bool
+  default     = true
+}

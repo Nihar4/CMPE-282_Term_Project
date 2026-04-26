@@ -82,8 +82,53 @@ output "cloud_armor_policy" {
   description = "Cloud Armor WAF policy name"
 }
 
+output "cloud_run_parser_url" {
+  value       = google_cloud_run_v2_service.parser_service.uri
+  description = "Cloud Run URL for parser-service (serverless burst)"
+}
+
+output "kms_keyring" {
+  value       = google_kms_key_ring.portal_keyring.id
+  description = "Cloud KMS key ring"
+}
+
+output "bigquery_dataset" {
+  value       = google_bigquery_dataset.portal_analytics.dataset_id
+  description = "BigQuery dataset for analytics events"
+}
+
+output "static_bucket" {
+  value       = google_storage_bucket.portal_static.name
+  description = "GCS bucket hosting the React build (served via Cloud CDN)"
+}
+
+output "lb_ip" {
+  value       = google_compute_global_address.portal_lb_ip.address
+  description = "Global LB IP — set this as A record at your DNS registrar"
+}
+
+output "cloud_build_main_trigger" {
+  value       = google_cloudbuild_trigger.main_branch.name
+  description = "Cloud Build trigger that runs on push to main"
+}
+
+output "tasks_queue" {
+  value       = google_cloud_tasks_queue.ai_rerank.name
+  description = "Cloud Tasks queue for AI re-ranking jobs"
+}
+
+output "cloud_function_file_ingest" {
+  value       = google_cloudfunctions2_function.file_ingest.name
+  description = "Cloud Function (Gen2) reacting to GCS finalize"
+}
+
+output "scheduler_nightly_summary" {
+  value       = google_cloud_scheduler_job.nightly_summary.name
+  description = "Cloud Scheduler job for nightly summary refresh"
+}
+
 output "setup_summary" {
-  value = <<-EOT
+  value       = <<-EOT
   =========================================================
    Enterprise Portal — GCP Infrastructure Ready
   =========================================================

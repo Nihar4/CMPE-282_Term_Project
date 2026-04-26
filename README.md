@@ -275,6 +275,7 @@ See [`docs/FUNCTIONALITY.md`](./docs/FUNCTIONALITY.md) for screenshots and featu
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Architects, reviewers — system + sequence diagrams      |
 | [`docs/FUNCTIONALITY.md`](./docs/FUNCTIONALITY.md) | Stakeholders — features, screenshots, journeys         |
 | [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)     | DevOps — GCP / GKE / Docker / Jenkins step-by-step      |
+| [`INFRASTRUCTURE.md`](./INFRASTRUCTURE.md)         | DevOps — every GCP service used and why (single source of truth) |
 | [`docs/SECURITY.md`](./docs/SECURITY.md)         | Security reviewers — Okta, layered defenses             |
 | [`docs/CICD.md`](./docs/CICD.md)                 | DevOps — Jenkins pipeline + GitHub + Okta SSO           |
 | [`docs/PROJECT_REPORT.md`](./docs/PROJECT_REPORT.md) | Faculty — academic project report                       |
@@ -284,9 +285,18 @@ See [`docs/FUNCTIONALITY.md`](./docs/FUNCTIONALITY.md) for screenshots and featu
 
 ## 13. Team & Course
 
-- **Course**: CMPE-282 — Cloud Technologies
+- **Course**: CMPE-282 — Cloud Technologies (Spring 2026)
 - **Term project**: Cloud-based Enterprise IT Infrastructure (Proof-of-Concept)
-- **Author / Maintainer**: Nihar (`@Nihar4`) — see GitHub for collaborators.
+- **Group**: **Serverless Squad** (4 students)
+
+| Member                          | Focus area                                                  |
+| ------------------------------- | ----------------------------------------------------------- |
+| Aditya Govind Shahari           | Frontend & UX, AI integration                               |
+| Mohsen Minai                    | Backend (Go), security, CORS / JWT / IAM                    |
+| Nihar Dharmeshkumar Patel       | Cloud architecture, GCP / Terraform / Kubernetes, CI/CD    |
+| Tamizh Selvan Manivannan        | Data engineering, parser-service (Python), analytics        |
+
+See [`TEAM.md`](./TEAM.md) for contribution breakdown.
 
 ## 14. License
 

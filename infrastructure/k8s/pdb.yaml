@@ -1,0 +1,40 @@
+# PodDisruptionBudgets — ensure availability during node upgrades / rolling deploys
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: enterprise-portal
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: api-gateway }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: auth-service-pdb
+  namespace: enterprise-portal
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: auth-service }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: data-service-pdb
+  namespace: enterprise-portal
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: data-service }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-service-pdb
+  namespace: enterprise-portal
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: ai-service }

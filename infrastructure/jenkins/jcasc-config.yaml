@@ -1,0 +1,128 @@
+# =============================================================
+# JCasC: Jenkins Configuration as Code (loaded by Helm chart).
+# Embed this file's content in values.yaml under
+#   controller.JCasC.configScripts.portal-config
+# OR mount as a config-map and point JCASC_AUTO_RELOAD at it.
+# =============================================================
+jenkins:
+  systemMessage: "Enterprise Portal CI/CD — Serverless Squad (CMPE-282)"
+  numExecutors: 0          # use cloud agents only
+  mode: NORMAL
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: admin
+            description: "Full access"
+            permissions:
+              - "Overall/Administer"
+            assignments:
+              - "authenticated"
+        items:
+          - name: developer
+            description: "Build & view"
+            pattern: ".*"
+            permissions:
+              - "Job/Build"
+              - "Job/Read"
+              - "Job/Workspace"
+              - "Job/Cancel"
+            assignments:
+              - "authenticated"
+
+  securityRealm:
+    oic:
+      clientId: "${OKTA_CLIENT_ID}"
+      clientSecret: "${OKTA_CLIENT_SECRET}"
+      wellKnownOpenIDConfigurationUrl: "${OKTA_OIDC_ISSUER}/.well-known/openid-configuration"
+      tokenAuthMethod: "client_secret_basic"
+      userNameField: "email"
+      fullNameFieldName: "name"
+      emailFieldName: "email"
+      groupsFieldName: "groups"
+      logoutFromOpenidProvider: true
+      escapeHatchEnabled: false
+
+  clouds:
+    - kubernetes:
+        name: "gke"
+        serverUrl: "https://kubernetes.default"
+        namespace: "jenkins"
+        jenkinsUrl: "http://jenkins.jenkins.svc.cluster.local:8080"
+        jenkinsTunnel: "jenkins-agent.jenkins.svc.cluster.local:50000"
+        containerCapStr: "20"
+        templates:
+          - name: "build-agent"
+            label: "build"
+            namespace: "jenkins"
+            yaml: |
+              apiVersion: v1
+              kind: Pod
+              spec:
+                serviceAccountName: jenkins-sa
+                containers:
+                  - name: jnlp
+                  - name: docker
+                    image: docker:25-dind
+                    securityContext:
+                      privileged: true
+                  - name: kubectl
+                    image: bitnami/kubectl:1.30
+                    command: ["sleep", "infinity"]
+                  - name: gcloud
+                    image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+                    command: ["sleep", "infinity"]
+
+unclassified:
+  location:
+    url: "https://jenkins.${DOMAIN_NAME}/"
+    adminAddress: "admin@${DOMAIN_NAME}"
+  globalLibraries:
+    libraries:
+      - name: "portal-shared-lib"
+        defaultVersion: "main"
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: github-pat
+              username: "${GITHUB_USER}"
+              password: "${GITHUB_PAT}"
+              description: "GitHub PAT for repo checkout"
+          - string:
+              scope: GLOBAL
+              id: nvidia-api-key
+              secret: "${NVIDIA_API_KEY}"
+              description: "NVIDIA NIM API key"
+
+jobs:
+  - script: >
+      multibranchPipelineJob('enterprise-portal') {
+        branchSources {
+          github {
+            id('enterprise-portal')
+            scanCredentialsId('github-pat')
+            repoOwner('${GITHUB_OWNER}')
+            repository('${GITHUB_REPO}')
+            buildOriginBranch(true)
+            buildOriginPRMerge(true)
+            buildForkPRMerge(false)
+          }
+        }
+        factory {
+          workflowBranchProjectFactory {
+            scriptPath('Jenkinsfile')
+          }
+        }
+        triggers {
+          periodicFolderTrigger { interval('5m') }
+        }
+      }

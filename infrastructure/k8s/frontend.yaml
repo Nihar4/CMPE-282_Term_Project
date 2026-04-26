@@ -3,21 +3,19 @@ kind: Deployment
 metadata:
   name: frontend
   namespace: enterprise-portal
-  labels:
-    app: frontend
+  labels: { app: frontend }
 spec:
   replicas: 2
   selector:
-    matchLabels:
-      app: frontend
+    matchLabels: { app: frontend }
   template:
     metadata:
-      labels:
-        app: frontend
+      labels: { app: frontend }
     spec:
+      serviceAccountName: portal-ksa
       containers:
         - name: frontend
-          image: gcr.io/enterprise-portal-48689/enterprise-portal-frontend:latest
+          image: us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal/frontend:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 80
@@ -35,8 +33,7 @@ metadata:
   name: frontend
   namespace: enterprise-portal
 spec:
-  selector:
-    app: frontend
+  selector: { app: frontend }
   ports:
     - port: 80
       targetPort: 80

@@ -1,0 +1,121 @@
+# =============================================================
+# Jenkins Helm chart values — Enterprise Portal CI/CD on GKE.
+# Helm repo: https://charts.jenkins.io
+# Install:
+#   helm repo add jenkins https://charts.jenkins.io
+#   helm repo update
+#   helm upgrade --install jenkins jenkins/jenkins \
+#     -n jenkins --create-namespace -f infrastructure/jenkins/values.yaml
+# =============================================================
+
+controller:
+  image:
+    registry: docker.io
+    repository: jenkins/jenkins
+    tag: 2.452.3-lts-jdk17
+
+  serviceType: LoadBalancer
+
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "2048Mi"
+    limits:
+      cpu: "2000m"
+      memory: "4096Mi"
+
+  javaOpts: "-Xms2g -Xmx3g -Dhudson.security.csrf.GlobalCrumbIssuerConfiguration.DISABLE_CSRF_PROTECTION=false"
+
+  # Workload Identity binding (created by Terraform)
+  serviceAccount:
+    create: true
+    name: jenkins-sa
+    annotations:
+      iam.gke.io/gcp-service-account: enterprise-portal-jenkins@${PROJECT_ID}.iam.gserviceaccount.com
+
+  # Plugins required for the pipeline + Okta SSO
+  installPlugins:
+    - kubernetes:4253.v7700d91739e5
+    - workflow-aggregator:600.vb_57cdd26fdy0
+    - git:5.2.2
+    - github:1.39.0
+    - configuration-as-code:1810.v9b_c30a_249a_4c
+    - google-oauth-plugin:1.0.7
+    - oic-auth:4.296.v3a_b_c69e0e8d4   # OpenID Connect → Okta SSO
+    - matrix-auth:3.2.2
+    - role-strategy:730.v04a_b_d9e2c4cb_
+    - sonar:2.17.2
+    - dependency-check-jenkins-plugin:5.5.0
+    - timestamper:1.27
+    - blueocean:1.27.13
+    - prometheus:2.4.0
+    - kubernetes-credentials-provider:1.247.v6c5d4eaf7c45
+
+  # Disable scripted setup wizard — JCasC handles it
+  installLatestPlugins: false
+
+  jenkinsAdminEmail: "admin@portal.example.com"
+
+  # Persistent storage for Jenkins home
+  persistence:
+    enabled: true
+    storageClass: "premium-rwo"
+    size: 50Gi
+
+  # Configuration as Code (JCasC) — see jcasc-config.yaml
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      portal-config: |
+        ${JCASC_PORTAL_CONFIG}
+
+  # Prometheus metrics endpoint exposed at /prometheus
+  prometheus:
+    enabled: true
+
+  # Liveness/readiness
+  livenessProbe:
+    initialDelaySeconds: 90
+    periodSeconds: 10
+  readinessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+
+agent:
+  enabled: true
+  podName: jenkins-agent
+  image:
+    registry: docker.io
+    repository: jenkins/inbound-agent
+    tag: latest
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1500m"
+      memory: "3Gi"
+  yamlTemplate: |
+    apiVersion: v1
+    kind: Pod
+    spec:
+      serviceAccountName: jenkins-sa
+      containers:
+        - name: jnlp
+        - name: docker
+          image: docker:25-dind
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+        - name: kubectl
+          image: bitnami/kubectl:1.30
+          command: ["sleep", "infinity"]
+        - name: gcloud
+          image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+          command: ["sleep", "infinity"]
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock

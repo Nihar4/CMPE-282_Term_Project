@@ -31,24 +31,54 @@ provider "google-beta" {
 
 resource "google_project_service" "apis" {
   for_each = toset([
-    "container.googleapis.com",          # GKE
-    "sqladmin.googleapis.com",           # Cloud SQL
-    "storage.googleapis.com",            # Cloud Storage
+    # Core
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
-    "compute.googleapis.com",            # GCE (Jenkins VM)
-    "servicenetworking.googleapis.com",  # Private networking
-    "redis.googleapis.com",              # Memorystore
-    "secretmanager.googleapis.com",      # Secret Manager
-    "pubsub.googleapis.com",             # Cloud Pub/Sub
-    "monitoring.googleapis.com",         # Cloud Monitoring
-    "logging.googleapis.com",            # Cloud Logging
-    "cloudtrace.googleapis.com",         # Cloud Trace
-    "artifactregistry.googleapis.com",   # Artifact Registry
-    "dns.googleapis.com",                # Cloud DNS
-    "cloudarmor.googleapis.com",         # Cloud Armor (via compute)
+    "iamcredentials.googleapis.com",
+    "serviceusage.googleapis.com",
+    "compute.googleapis.com",           # GCE (Jenkins VM)
+    "servicenetworking.googleapis.com", # Private networking
     "networkmanagement.googleapis.com",
+
+    # Containers / Build
+    "container.googleapis.com",        # GKE
+    "artifactregistry.googleapis.com", # Artifact Registry
+    "cloudbuild.googleapis.com",       # Cloud Build (CI alt)
+
+    # Data
+    "sqladmin.googleapis.com", # Cloud SQL
+    "redis.googleapis.com",    # Memorystore
+    "storage.googleapis.com",  # Cloud Storage
+    "bigquery.googleapis.com", # BigQuery (analytics)
+
+    # Messaging
+    "pubsub.googleapis.com", # Cloud Pub/Sub
+
+    # Serverless
+    "run.googleapis.com",            # Cloud Run
+    "cloudfunctions.googleapis.com", # Cloud Functions Gen2
+    "cloudscheduler.googleapis.com", # Cloud Scheduler
+    "cloudtasks.googleapis.com",     # Cloud Tasks
+    "eventarc.googleapis.com",       # required by Functions Gen2
+
+    # Security
+    "secretmanager.googleapis.com", # Secret Manager
+    "cloudkms.googleapis.com",      # Cloud KMS
+
+    # Networking & SSL
+    "dns.googleapis.com",                # Cloud DNS
     "iap.googleapis.com",                # Identity-Aware Proxy
+    "certificatemanager.googleapis.com", # Cert Manager
+    "cloudarmor.googleapis.com",         # Cloud Armor (via compute)
+
+    # Observability
+    "monitoring.googleapis.com",    # Cloud Monitoring
+    "logging.googleapis.com",       # Cloud Logging
+    "cloudtrace.googleapis.com",    # Cloud Trace
+    "cloudprofiler.googleapis.com", # Cloud Profiler
+
+    # AI
+    "aiplatform.googleapis.com", # Vertex AI
   ])
   service            = each.key
   disable_on_destroy = false
@@ -67,7 +97,7 @@ resource "google_compute_subnetwork" "portal_subnet" {
   ip_cidr_range            = "10.0.0.0/16"
   region                   = var.region
   network                  = google_compute_network.portal_vpc.id
-  private_ip_google_access = true  # Allow access to Google APIs without public IP
+  private_ip_google_access = true # Allow access to Google APIs without public IP
 
   secondary_ip_range {
     range_name    = "pods"
@@ -173,7 +203,7 @@ resource "google_compute_firewall" "allow_health_checks" {
 resource "google_container_cluster" "portal_cluster" {
   provider = google-beta
   name     = var.cluster_name
-  location = var.region  # Regional = multi-zone HA
+  location = var.region # Regional = multi-zone HA
 
   network    = google_compute_network.portal_vpc.id
   subnetwork = google_compute_subnetwork.portal_subnet.id
@@ -206,7 +236,7 @@ resource "google_container_cluster" "portal_cluster" {
 
   addons_config {
     horizontal_pod_autoscaling { disabled = false }
-    http_load_balancing        { disabled = false }
+    http_load_balancing { disabled = false }
     gce_persistent_disk_csi_driver_config { enabled = true }
     gcs_fuse_csi_driver_config { enabled = true }
   }
@@ -226,7 +256,7 @@ resource "google_container_cluster" "portal_cluster" {
 
   # Binary Authorization — only signed images
   binary_authorization {
-    evaluation_mode = "DISABLED"  # Set to PROJECT_SINGLETON_POLICY_ENFORCE for prod
+    evaluation_mode = "DISABLED" # Set to PROJECT_SINGLETON_POLICY_ENFORCE for prod
   }
 
   cost_management_config {
@@ -340,11 +370,11 @@ resource "google_sql_database_instance" "portal_db" {
 
   settings {
     tier              = var.db_tier
-    availability_type = "REGIONAL"  # HA with automatic failover replica
+    availability_type = "REGIONAL" # HA with automatic failover replica
 
-    disk_size         = 50
-    disk_type         = "PD_SSD"
-    disk_autoresize   = true
+    disk_size             = 50
+    disk_type             = "PD_SSD"
+    disk_autoresize       = true
     disk_autoresize_limit = 500
 
     backup_configuration {
@@ -387,8 +417,8 @@ resource "google_sql_database_instance" "portal_db" {
     }
 
     maintenance_window {
-      day          = 7   # Sunday
-      hour         = 2   # 2 AM UTC
+      day          = 7 # Sunday
+      hour         = 2 # 2 AM UTC
       update_track = "stable"
     }
   }
@@ -482,7 +512,7 @@ resource "google_storage_bucket" "portal_files" {
 
   lifecycle_rule {
     condition {
-      age          = 90
+      age                   = 90
       matches_storage_class = ["STANDARD"]
     }
     action {
@@ -529,7 +559,7 @@ resource "google_redis_instance" "portal_redis" {
   redis_version           = "REDIS_7_0"
   display_name            = "Enterprise Portal Redis"
   auth_enabled            = true
-  transit_encryption_mode = "DISABLED"  # Enable for production: SERVER_AUTHENTICATION
+  transit_encryption_mode = "DISABLED" # Enable for production: SERVER_AUTHENTICATION
 
   redis_configs = {
     "maxmemory-policy" = "allkeys-lru"
@@ -559,7 +589,7 @@ resource "google_redis_instance" "portal_redis" {
 resource "google_pubsub_topic" "file_events" {
   name = "enterprise-portal-file-events"
 
-  message_retention_duration = "86600s"  # 24 hours
+  message_retention_duration = "86600s" # 24 hours
 
   depends_on = [google_project_service.apis]
 }
@@ -584,7 +614,7 @@ resource "google_pubsub_subscription" "file_events_sub" {
 
 # Topic: AI query events
 resource "google_pubsub_topic" "ai_events" {
-  name = "enterprise-portal-ai-events"
+  name                       = "enterprise-portal-ai-events"
   message_retention_duration = "86600s"
 }
 
@@ -592,7 +622,7 @@ resource "google_pubsub_subscription" "ai_events_sub" {
   name  = "enterprise-portal-ai-events-sub"
   topic = google_pubsub_topic.ai_events.name
 
-  ack_deadline_seconds = 120
+  ack_deadline_seconds       = 120
   message_retention_duration = "86600s"
 
   retry_policy {
@@ -603,7 +633,7 @@ resource "google_pubsub_subscription" "ai_events_sub" {
 
 # Topic: notification events
 resource "google_pubsub_topic" "notification_events" {
-  name = "enterprise-portal-notifications"
+  name                       = "enterprise-portal-notifications"
   message_retention_duration = "86600s"
 }
 
@@ -647,11 +677,11 @@ resource "google_service_account" "jenkins_sa" {
 
 resource "google_project_iam_member" "jenkins_roles" {
   for_each = toset([
-    "roles/container.developer",       # Deploy to GKE
-    "roles/artifactregistry.writer",   # Push Docker images
-    "roles/storage.objectAdmin",       # Access GCS
+    "roles/container.developer",          # Deploy to GKE
+    "roles/artifactregistry.writer",      # Push Docker images
+    "roles/storage.objectAdmin",          # Access GCS
     "roles/secretmanager.secretAccessor", # Read secrets
-    "roles/cloudsql.client",           # Connect to Cloud SQL
+    "roles/cloudsql.client",              # Connect to Cloud SQL
     "roles/logging.logWriter",
     "roles/monitoring.metricWriter",
   ])
@@ -662,7 +692,7 @@ resource "google_project_iam_member" "jenkins_roles" {
 
 resource "google_compute_instance" "jenkins" {
   name         = "jenkins-server"
-  machine_type = "e2-standard-4"  # 4 vCPU, 16 GB RAM
+  machine_type = "e2-standard-4" # 4 vCPU, 16 GB RAM
   zone         = var.zone
   tags         = ["jenkins"]
 

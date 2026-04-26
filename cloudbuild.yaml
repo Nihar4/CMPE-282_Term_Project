@@ -1,0 +1,119 @@
+# =============================================================
+# Cloud Build pipeline for the main branch.
+# Builds all 7 images in parallel, runs Trivy scan, pushes to
+# Artifact Registry, then rolls out to GKE.
+# =============================================================
+substitutions:
+  _REGION: "us-central1"
+  _CLUSTER: "enterprise-portal-cluster"
+  _AR_REPO: "enterprise-portal"
+  _NAMESPACE: "enterprise-portal"
+
+options:
+  machineType: "E2_HIGHCPU_8"
+  logging: CLOUD_LOGGING_ONLY
+  dynamic_substitutions: true
+
+images:
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api-gateway:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/auth-service:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/data-service:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/file-service:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/ai-service:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/analytics-service:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/parser-service:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/frontend:$SHORT_SHA"
+
+steps:
+  # ── Build all backends in parallel ─────────────────────────────────────
+  - id: "build-api-gateway"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api-gateway:$SHORT_SHA", "backend/api-gateway"]
+    waitFor: ["-"]
+
+  - id: "build-auth-service"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/auth-service:$SHORT_SHA", "backend/auth-service"]
+    waitFor: ["-"]
+
+  - id: "build-data-service"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/data-service:$SHORT_SHA", "backend/data-service"]
+    waitFor: ["-"]
+
+  - id: "build-file-service"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/file-service:$SHORT_SHA", "backend/file-service"]
+    waitFor: ["-"]
+
+  - id: "build-ai-service"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/ai-service:$SHORT_SHA", "backend/ai-service"]
+    waitFor: ["-"]
+
+  - id: "build-analytics-service"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/analytics-service:$SHORT_SHA", "backend/analytics-service"]
+    waitFor: ["-"]
+
+  - id: "build-parser-service"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/parser-service:$SHORT_SHA", "backend/parser-service"]
+    waitFor: ["-"]
+
+  - id: "build-frontend"
+    name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/frontend:$SHORT_SHA", "frontend"]
+    waitFor: ["-"]
+
+  # ── Push images (Cloud Build does this automatically via `images:` ──
+  # ── Trivy scan critical/high CVEs ─────────────────────────────────────
+  - id: "trivy-scan"
+    name: "aquasec/trivy:latest"
+    args:
+      [
+        "image",
+        "--severity", "CRITICAL,HIGH",
+        "--exit-code", "0",
+        "--ignore-unfixed",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api-gateway:$SHORT_SHA",
+      ]
+    waitFor:
+      ["build-api-gateway", "build-auth-service", "build-data-service",
+       "build-file-service", "build-ai-service", "build-analytics-service",
+       "build-parser-service", "build-frontend"]
+
+  # ── Render Kubernetes manifests with new image tags ───────────────────
+  - id: "render-manifests"
+    name: "gcr.io/cloud-builders/gcloud"
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        set -e
+        for f in infrastructure/k8s/*.yaml; do
+          sed -i "s|:latest|:$SHORT_SHA|g" "$$f"
+        done
+
+  # ── Deploy to GKE ─────────────────────────────────────────────────────
+  - id: "deploy"
+    name: "gcr.io/cloud-builders/kubectl"
+    env:
+      - "CLOUDSDK_COMPUTE_REGION=${_REGION}"
+      - "CLOUDSDK_CONTAINER_CLUSTER=${_CLUSTER}"
+    args:
+      ["apply", "-f", "infrastructure/k8s/", "-n", "${_NAMESPACE}"]
+    waitFor: ["render-manifests", "trivy-scan"]
+
+  # ── Smoke test ────────────────────────────────────────────────────────
+  - id: "smoke-test"
+    name: "curlimages/curl:latest"
+    entrypoint: sh
+    args:
+      - "-c"
+      - |
+        sleep 30
+        curl -f https://${_DOMAIN}/api/health || exit 1
+    waitFor: ["deploy"]
+
+timeout: "1800s"

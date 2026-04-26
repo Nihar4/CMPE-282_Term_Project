@@ -1,3 +1,4 @@
+# GKE Ingress with Google-managed SSL and Cloud Armor
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -8,9 +9,11 @@ metadata:
     kubernetes.io/ingress.allow-http: "false"
     networking.gke.io/managed-certificates: "portal-ssl-cert"
     networking.gke.io/v1beta1.FrontendConfig: "portal-frontend-config"
+    # Cloud Armor WAF policy
+    compute.googleapis.com/security-policy: "enterprise-portal-armor"
 spec:
   rules:
-    - host: portal.yourdomain.com        # Replace with your domain
+    - host: portal.yourdomain.com
       http:
         paths:
           - path: /api
@@ -28,7 +31,6 @@ spec:
                 port:
                   number: 80
 ---
-# Managed SSL Certificate (GKE)
 apiVersion: networking.gke.io/v1
 kind: ManagedCertificate
 metadata:
@@ -36,9 +38,8 @@ metadata:
   namespace: enterprise-portal
 spec:
   domains:
-    - portal.yourdomain.com              # Replace with your domain
+    - portal.yourdomain.com
 ---
-# HTTPS redirect
 apiVersion: networking.gke.io/v1beta1
 kind: FrontendConfig
 metadata:
@@ -48,3 +49,4 @@ spec:
   redirectToHttps:
     enabled: true
     responseCodeName: MOVED_PERMANENTLY_DEFAULT
+  sslPolicy: portal-ssl-policy
