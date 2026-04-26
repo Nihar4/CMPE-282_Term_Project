@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-config
+  namespace: enterprise-portal
+data:
+  # ── Database (Cloud SQL via proxy sidecar on 127.0.0.1:5432) ──────────────
+  DB_HOST: "127.0.0.1"
+  DB_PORT: "5432"
+  DB_NAME: "enterprise_portal"
+  DB_USER: "portal_user"
+  CLOUD_SQL_INSTANCE: "enterprise-portal-48689:us-central1:enterprise-portal-pg"
+
+  # ── Redis (Cloud Memorystore — run: terraform output redis_host) ───────────
+  REDIS_URL: "REPLACE_WITH_MEMORYSTORE_IP:6379"
+
+  # ── GCP & Pub/Sub ─────────────────────────────────────────────────────────
+  GCP_PROJECT_ID:     "enterprise-portal-48689"
+  GCP_REGION:         "us-central1"
+  PUBSUB_FILE_TOPIC:  "enterprise-portal-file-events"
+  PUBSUB_AI_TOPIC:    "enterprise-portal-ai-events"
+  PUBSUB_NOTIF_TOPIC: "enterprise-portal-notifications"
+  PUBSUB_FILE_SUB:    "enterprise-portal-file-events-sub"
+  PUBSUB_AI_SUB:      "enterprise-portal-ai-events-sub"
+
+  # ── Cloud Storage ─────────────────────────────────────────────────────────
+  GCS_BUCKET: "enterprise-portal-files-enterprise-portal-48689"
+  USE_GCS:    "true"
+
+  # ── AI ────────────────────────────────────────────────────────────────────
+  NVIDIA_BASE_URL: "https://integrate.api.nvidia.com/v1"
+  NVIDIA_MODEL:    "deepseek-ai/deepseek-v4-flash"
+
+  # ── Auth0 ─────────────────────────────────────────────────────────────────
+  AUTH0_DOMAIN:    "dev-xbnsordr5elttyug.us.auth0.com"
+  AUTH0_CLIENT_ID: "x8pFzWFtyYCBXrr6U2NkxABroQqqMvxM"
+
+  # ── Runtime ───────────────────────────────────────────────────────────────
+  DEV_MODE:        "false"
+  ALLOWED_ORIGINS: "https://portal.yourdomain.com,http://localhost:3000"
+  UPLOAD_DIR:      "/app/uploads"
+
+  # ── Internal service DNS ──────────────────────────────────────────────────
+  AUTH_SERVICE_URL:      "http://auth-service:8081"
+  DATA_SERVICE_URL:      "http://data-service:8082"
+  FILE_SERVICE_URL:      "http://file-service:8083"
+  AI_SERVICE_URL:        "http://ai-service:8084"
+  ANALYTICS_SERVICE_URL: "http://analytics-service:8085"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: portal-secrets
+  namespace: enterprise-portal
+type: Opaque
+stringData:
+  # IMPORTANT: replace these placeholders via `kubectl edit secret portal-secrets`
+  # or via external-secrets-operator backed by GCP Secret Manager.
+  # NEVER commit real values for these keys.
+  DB_PASSWORD:         "REPLACE_WITH_DB_PASSWORD"
+  JWT_SECRET:          "REPLACE_WITH_STRONG_RANDOM_SECRET_MIN_32_CHARS"
+  NVIDIA_API_KEY:      "REPLACE_WITH_NVIDIA_API_KEY"
+  AUTH0_CLIENT_SECRET: "REPLACE_WITH_AUTH0_CLIENT_SECRET"

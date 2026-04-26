@@ -1,0 +1,80 @@
+# ───── Compiled binaries ─────
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# ───── Go ─────
+*.test
+*.out
+vendor/
+# go.sum is committed for reproducible builds.
+
+# Compiled service binaries (we never commit these)
+backend/api-gateway/api-gateway
+backend/auth-service/auth-service
+backend/data-service/data-service
+backend/file-service/file-service
+backend/ai-service/ai-service
+backend/analytics-service/analytics-service
+backend/parser-service/parser-service
+
+# ───── Node / React ─────
+node_modules/
+build/
+.npm
+.eslintcache
+
+# ───── Python ─────
+__pycache__/
+*.pyc
+.venv/
+
+# ───── Environment ─────
+.env
+.env.local
+.env.*.local
+*.env
+
+# ───── Docker ─────
+.dockerignore
+
+# ───── Terraform ─────
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+terraform.tfplan
+
+# ───── IDE ─────
+.vscode/
+.idea/
+.claude/
+.cursor/
+*.swp
+*.swo
+
+# ───── OS ─────
+.DS_Store
+Thumbs.db
+
+# ───── Uploads (local dev) ─────
+uploads/
+*.log
+
+# ───── Secrets / GCP credentials ─────
+*-credentials.json
+service-account.json
+gcp-key.json
+gcp-service-account.json
+*-sa-key.json
+*.pem
+*.key
+
+# Tmp scratch dirs
+.tmp_*/

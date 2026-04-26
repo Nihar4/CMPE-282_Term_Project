@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portal-ingress
+  namespace: enterprise-portal
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+    networking.gke.io/managed-certificates: "portal-ssl-cert"
+    networking.gke.io/v1beta1.FrontendConfig: "portal-frontend-config"
+spec:
+  rules:
+    - host: portal.yourdomain.com        # Replace with your domain
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+---
+# Managed SSL Certificate (GKE)
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: portal-ssl-cert
+  namespace: enterprise-portal
+spec:
+  domains:
+    - portal.yourdomain.com              # Replace with your domain
+---
+# HTTPS redirect
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: portal-frontend-config
+  namespace: enterprise-portal
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT

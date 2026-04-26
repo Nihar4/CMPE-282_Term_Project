@@ -1,0 +1,376 @@
+# Cloud SQL Proxy sidecar template (reused in each deployment below)
+# Connects pods to Cloud SQL via private unix socket
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth Service
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: enterprise-portal
+  labels: { app: auth-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: auth-service }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: auth-service }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      serviceAccountName: portal-ksa
+      containers:
+        - name: auth-service
+          image: us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal/auth-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+          env:
+            - name: PORT
+              value: "8081"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: JWT_SECRET }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: DB_PASSWORD }
+            - name: AUTH0_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: AUTH0_CLIENT_SECRET }
+          envFrom:
+            - configMapRef: { name: portal-config }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          livenessProbe:
+            httpGet: { path: /health, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /health, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+        # Cloud SQL Proxy sidecar
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "enterprise-portal-48689:us-central1:enterprise-portal-pg"
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+          securityContext:
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: enterprise-portal
+spec:
+  selector: { app: auth-service }
+  ports:
+    - port: 8081
+      targetPort: 8081
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Data Service
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-service
+  namespace: enterprise-portal
+  labels: { app: data-service }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: data-service }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 2 }
+  template:
+    metadata:
+      labels: { app: data-service }
+    spec:
+      serviceAccountName: portal-ksa
+      containers:
+        - name: data-service
+          image: us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal/data-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8082
+          env:
+            - name: PORT
+              value: "8082"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: DB_PASSWORD }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: JWT_SECRET }
+          envFrom:
+            - configMapRef: { name: portal-config }
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
+          livenessProbe:
+            httpGet: { path: /health, port: 8082 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /health, port: 8082 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "enterprise-portal-48689:us-central1:enterprise-portal-pg"
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+          securityContext:
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-service
+  namespace: enterprise-portal
+spec:
+  selector: { app: data-service }
+  ports:
+    - port: 8082
+      targetPort: 8082
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: data-service-hpa
+  namespace: enterprise-portal
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: data-service
+  minReplicas: 3
+  maxReplicas: 30
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# File Service
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: file-service
+  namespace: enterprise-portal
+  labels: { app: file-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: file-service }
+  template:
+    metadata:
+      labels: { app: file-service }
+    spec:
+      serviceAccountName: portal-ksa
+      containers:
+        - name: file-service
+          image: us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal/file-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8083
+          env:
+            - name: PORT
+              value: "8083"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: DB_PASSWORD }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: JWT_SECRET }
+          envFrom:
+            - configMapRef: { name: portal-config }
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+          livenessProbe:
+            httpGet: { path: /health, port: 8083 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "enterprise-portal-48689:us-central1:enterprise-portal-pg"
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+          securityContext:
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: file-service
+  namespace: enterprise-portal
+spec:
+  selector: { app: file-service }
+  ports:
+    - port: 8083
+      targetPort: 8083
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Service
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  namespace: enterprise-portal
+  labels: { app: ai-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: ai-service }
+  template:
+    metadata:
+      labels: { app: ai-service }
+    spec:
+      serviceAccountName: portal-ksa
+      containers:
+        - name: ai-service
+          image: us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal/ai-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8084
+          env:
+            - name: PORT
+              value: "8084"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: DB_PASSWORD }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: JWT_SECRET }
+            - name: NVIDIA_API_KEY
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: NVIDIA_API_KEY }
+          envFrom:
+            - configMapRef: { name: portal-config }
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+          livenessProbe:
+            httpGet: { path: /health, port: 8084 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "enterprise-portal-48689:us-central1:enterprise-portal-pg"
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+          securityContext:
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  namespace: enterprise-portal
+spec:
+  selector: { app: ai-service }
+  ports:
+    - port: 8084
+      targetPort: 8084
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Analytics Service
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: enterprise-portal
+  labels: { app: analytics-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: analytics-service }
+  template:
+    metadata:
+      labels: { app: analytics-service }
+    spec:
+      serviceAccountName: portal-ksa
+      containers:
+        - name: analytics-service
+          image: us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal/analytics-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8085
+          env:
+            - name: PORT
+              value: "8085"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: DB_PASSWORD }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: portal-secrets, key: JWT_SECRET }
+          envFrom:
+            - configMapRef: { name: portal-config }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          livenessProbe:
+            httpGet: { path: /health, port: 8085 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "enterprise-portal-48689:us-central1:enterprise-portal-pg"
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+          securityContext:
+            runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: enterprise-portal
+spec:
+  selector: { app: analytics-service }
+  ports:
+    - port: 8085
+      targetPort: 8085

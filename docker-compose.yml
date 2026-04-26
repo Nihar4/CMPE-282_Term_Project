@@ -1,0 +1,268 @@
+version: '3.9'
+
+services:
+  # ─── Infrastructure ────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: portal-postgres
+    environment:
+      POSTGRES_DB: enterprise_portal
+      POSTGRES_USER: portal_user
+      POSTGRES_PASSWORD: portal_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql
+      - ./database/migrations/002_testdb.sql:/docker-entrypoint-initdb.d/002_testdb.sql
+      - ./database/seeds/002_testdb_sample.sql:/docker-entrypoint-initdb.d/003_seed.sql
+    networks:
+      - portal_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal_user -d enterprise_portal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: portal-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - portal_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: portal-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - portal_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: portal-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - portal_network
+
+  # ─── Backend Services ───────────────────────────────────────────────────────
+
+  api-gateway:
+    build:
+      context: ./backend/api-gateway
+      dockerfile: Dockerfile
+    container_name: portal-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      AUTH_SERVICE_URL: http://auth-service:8081
+      DATA_SERVICE_URL: http://data-service:8082
+      FILE_SERVICE_URL: http://file-service:8083
+      AI_SERVICE_URL: http://ai-service:8084
+      ANALYTICS_SERVICE_URL: http://analytics-service:8085
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://localhost:3000,https://127.0.0.1:3000,https://localhost:5173,https://127.0.0.1:5173
+    depends_on:
+      auth-service:
+        condition: service_started
+      data-service:
+        condition: service_started
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  auth-service:
+    build:
+      context: ./backend/auth-service
+      dockerfile: Dockerfile
+    container_name: portal-auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: "8081"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: enterprise_portal
+      DB_USER: portal_user
+      DB_PASSWORD: portal_password
+      REDIS_URL: redis:6379
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-xbnsordr5elttyug.us.auth0.com}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-x8pFzWFtyYCBXrr6U2NkxABroQqqMvxM}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-replace-via-env-or-secret-manager}
+      OKTA_DOMAIN: ${OKTA_DOMAIN:-dev-example.okta.com}
+      OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-your-okta-client-id}
+      OKTA_CLIENT_SECRET: ${OKTA_CLIENT_SECRET:-your-okta-client-secret}
+      OKTA_REDIRECT_URI: ${OKTA_REDIRECT_URI:-http://localhost:8080/api/auth/callback}
+      DEV_MODE: ${DEV_MODE:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  data-service:
+    build:
+      context: ./backend/data-service
+      dockerfile: Dockerfile
+    container_name: portal-data-service
+    ports:
+      - "8082:8082"
+    environment:
+      PORT: "8082"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: enterprise_portal
+      DB_USER: portal_user
+      DB_PASSWORD: portal_password
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  parser-service:
+    build:
+      context: ./backend/parser-service
+      dockerfile: Dockerfile
+    container_name: portal-parser-service
+    ports:
+      - "8090:8090"
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  file-service:
+    build:
+      context: ./backend/file-service
+      dockerfile: Dockerfile
+    container_name: portal-file-service
+    ports:
+      - "8083:8083"
+    environment:
+      PORT: "8083"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: enterprise_portal
+      DB_USER: portal_user
+      DB_PASSWORD: portal_password
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+      GCS_BUCKET: ${GCS_BUCKET:-enterprise-portal-files}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-your-gcp-project}
+      UPLOAD_DIR: /app/uploads
+      KAFKA_BROKERS: kafka:9092
+      USE_LOCAL_STORAGE: "true"
+      PARSER_SERVICE_URL: http://parser-service:8090
+    volumes:
+      - file_uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      parser-service:
+        condition: service_started
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  ai-service:
+    build:
+      context: ./backend/ai-service
+      dockerfile: Dockerfile
+    container_name: portal-ai-service
+    ports:
+      - "8084:8084"
+    environment:
+      PORT: "8084"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: enterprise_portal
+      DB_USER: portal_user
+      DB_PASSWORD: portal_password
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-replace-via-env-or-secret-manager}
+      NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
+      NVIDIA_MODEL: moonshotai/kimi-k2-instruct
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  analytics-service:
+    build:
+      context: ./backend/analytics-service
+      dockerfile: Dockerfile
+    container_name: portal-analytics-service
+    ports:
+      - "8085:8085"
+    environment:
+      PORT: "8085"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: enterprise_portal
+      DB_USER: portal_user
+      DB_PASSWORD: portal_password
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  # ─── Frontend ───────────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: portal-frontend
+    ports:
+      - "3000:80"
+    environment:
+      REACT_APP_API_URL: http://localhost:8080
+    depends_on:
+      - api-gateway
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+networks:
+  portal_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  file_uploads:

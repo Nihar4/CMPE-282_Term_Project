@@ -1,0 +1,53 @@
+{
+  "name": "enterprise-knowledge-portal",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@auth0/auth0-react": "^2.2.4",
+    "@emotion/react": "^11.11.3",
+    "@emotion/styled": "^11.11.0",
+    "@mui/icons-material": "^5.15.10",
+    "@mui/material": "^5.15.10",
+    "@mui/x-charts": "^7.0.0",
+    "@mui/x-data-grid": "^7.0.0",
+    "axios": "^1.6.7",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-dropzone": "^14.2.3",
+    "react-markdown": "^9.0.1",
+    "react-router-dom": "^6.22.1",
+    "react-scripts": "5.0.1",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^5.3.3",
+    "web-vitals": "^3.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.17",
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "proxy": "http://localhost:8080"
+}
