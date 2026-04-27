@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
@@ -21,6 +22,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -59,6 +61,16 @@ type FileChunk struct {
 
 func (FileChunk) TableName() string { return "file_chunks" }
 
+type NotificationEvent struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id,omitempty"`
+	Type      string    `json:"type"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Icon      string    `json:"icon"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
@@ -70,11 +82,15 @@ type Config struct {
 	GCPProject       string
 	UseLocalStorage  bool
 	KafkaBrokers     []string
+	NotificationsTopic string
 	ParserServiceURL string
 }
 
 func loadConfig() *Config {
 	brokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
+	for i := range brokers {
+		brokers[i] = strings.TrimSpace(brokers[i])
+	}
 	return &Config{
 		Port: getEnv("PORT", "8083"),
 		DBDSN: fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable TimeZone=UTC",
@@ -90,6 +106,7 @@ func loadConfig() *Config {
 		GCPProject:       getEnv("GCP_PROJECT_ID", ""),
 		UseLocalStorage:  getEnv("USE_LOCAL_STORAGE", "true") == "true",
 		KafkaBrokers:     brokers,
+		NotificationsTopic: getEnv("NOTIFICATIONS_TOPIC", "portal.notifications"),
 		ParserServiceURL: getEnv("PARSER_SERVICE_URL", "http://parser-service:8090"),
 	}
 }
@@ -257,7 +274,14 @@ func parseTXT(data []byte) ([]string, error) {
 
 // parsePDF extracts text from a PDF file using raw content extraction
 // For production, integrate pdfcpu or unipdf; this handles text-based PDFs
-func parsePDF(data []byte) ([]string, error) {
+func parsePDF(data []byte) (chunks []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pdf parser panic: %v", r)
+			chunks = nil
+		}
+	}()
+
 	// First try structured extraction via rsc.io/pdf.
 	if reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data))); err == nil {
 		var extracted strings.Builder
@@ -310,6 +334,16 @@ func parsePDF(data []byte) ([]string, error) {
 	}
 
 	return parseTXT([]byte(text))
+}
+
+func safeParsePDF(data []byte) (chunks []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pdf parser panic: %v", r)
+			chunks = nil
+		}
+	}()
+	return parsePDF(data)
 }
 
 func compactWhitespace(s string) string {
@@ -369,8 +403,33 @@ func (h *FileHandler) parseViaPythonService(record *UploadedFile, data []byte) (
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 type FileHandler struct {
-	db  *gorm.DB
-	cfg *Config
+	db                 *gorm.DB
+	cfg                *Config
+	notificationWriter *kafka.Writer
+}
+
+func (h *FileHandler) publishNotification(ctx context.Context, event NotificationEvent) {
+	if h.notificationWriter == nil {
+		return
+	}
+	if event.ID == "" {
+		event.ID = uuid.NewString()
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("could not marshal notification: %v", err)
+		return
+	}
+	if err := h.notificationWriter.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(event.ID),
+		Value: payload,
+		Time:  event.CreatedAt,
+	}); err != nil {
+		log.Printf("Kafka notification publish failed: %v", err)
+	}
 }
 
 func (h *FileHandler) saveFile(header *multipart.FileHeader, file multipart.File) (string, string, error) {
@@ -443,10 +502,32 @@ func (h *FileHandler) Upload(c *gin.Context) {
 }
 
 func (h *FileHandler) processFile(record *UploadedFile, path string) {
+	defer func() {
+		if r := recover(); r != nil {
+			errMsg := fmt.Sprintf("file processing panic: %v", r)
+			log.Printf("%s for %s", errMsg, record.OriginalName)
+			h.db.Model(record).Updates(map[string]interface{}{
+				"status": "error", "error_message": errMsg,
+			})
+			h.publishNotification(context.Background(), NotificationEvent{
+				Type:  "file_failed",
+				Title: "File processing failed",
+				Body:  fmt.Sprintf("%q could not be processed", record.OriginalName),
+				Icon:  "warning",
+			})
+		}
+	}()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		h.db.Model(record).Updates(map[string]interface{}{
 			"status": "error", "error_message": "failed to read file",
+		})
+		h.publishNotification(context.Background(), NotificationEvent{
+			Type:  "file_failed",
+			Title: "File processing failed",
+			Body:  fmt.Sprintf("%q could not be read for processing", record.OriginalName),
+			Icon:  "warning",
 		})
 		return
 	}
@@ -464,10 +545,16 @@ func (h *FileHandler) processFile(record *UploadedFile, path string) {
 				h.db.Model(record).Updates(map[string]interface{}{
 					"status": "error", "error_message": err.Error(),
 				})
+				h.publishNotification(context.Background(), NotificationEvent{
+					Type:  "file_failed",
+					Title: "File processing failed",
+					Body:  fmt.Sprintf("%q could not be parsed: %v", record.OriginalName, err),
+					Icon:  "warning",
+				})
 				return
 			}
 		case "pdf":
-			chunks, err = parsePDF(data)
+			chunks, err = safeParsePDF(data)
 			if err != nil {
 				chunks = []string{fmt.Sprintf("PDF content (%d bytes)", len(data))}
 			}
@@ -505,6 +592,13 @@ func (h *FileHandler) processFile(record *UploadedFile, path string) {
 		"status":    "ready",
 		"row_count": rowCount,
 		"metadata":  string(metaJSON),
+	})
+
+	h.publishNotification(context.Background(), NotificationEvent{
+		Type:  "file_ready",
+		Title: strings.ToUpper(record.FileType) + " file ready",
+		Body:  fmt.Sprintf("%q has been processed with %d chunk(s)", record.OriginalName, len(chunks)),
+		Icon:  "file",
 	})
 
 	log.Printf("Processed file %s: %d chunks", record.OriginalName, len(chunks))
@@ -573,6 +667,13 @@ func (h *FileHandler) DeleteFile(c *gin.Context) {
 		os.Remove(f.StoragePath)
 	}
 
+	h.publishNotification(c.Request.Context(), NotificationEvent{
+		Type:  "file_deleted",
+		Title: "File deleted",
+		Body:  fmt.Sprintf("%q was removed from the document repository", f.OriginalName),
+		Icon:  "file",
+	})
+
 	c.JSON(http.StatusOK, gin.H{"message": "file deleted", "id": f.ID})
 }
 
@@ -611,6 +712,13 @@ func (h *FileHandler) DeleteAllFiles(c *gin.Context) {
 		"deleted_file_count": len(files),
 		"deleted_local_files": deletedFromDisk,
 	})
+
+	h.publishNotification(c.Request.Context(), NotificationEvent{
+		Type:  "file_deleted",
+		Title: "All files deleted",
+		Body:  fmt.Sprintf("%d file(s) were removed from the document repository", len(files)),
+		Icon:  "file",
+	})
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -631,7 +739,14 @@ func main() {
 
 	os.MkdirAll(cfg.UploadDir, 0755)
 
-	h := &FileHandler{db: db, cfg: cfg}
+	notificationWriter := &kafka.Writer{
+		Addr:         kafka.TCP(cfg.KafkaBrokers...),
+		Topic:        cfg.NotificationsTopic,
+		Balancer:     &kafka.LeastBytes{},
+		RequiredAcks: kafka.RequireOne,
+	}
+
+	h := &FileHandler{db: db, cfg: cfg, notificationWriter: notificationWriter}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

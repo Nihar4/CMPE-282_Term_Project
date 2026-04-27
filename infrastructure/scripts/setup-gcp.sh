@@ -19,7 +19,6 @@ echo "================================================================"
 # ── 1. Verify prerequisites ─────────────────────────────────────────────────
 command -v gcloud   >/dev/null 2>&1 || { echo "ERROR: gcloud not installed"; exit 1; }
 command -v terraform >/dev/null 2>&1 || { echo "ERROR: terraform not installed"; exit 1; }
-command -v kubectl  >/dev/null 2>&1 || { echo "ERROR: kubectl not installed"; exit 1; }
 command -v docker   >/dev/null 2>&1 || { echo "ERROR: docker not installed"; exit 1; }
 
 # ── 2. Authenticate with GCP ────────────────────────────────────────────────
@@ -50,14 +49,15 @@ DB_PASS="${DB_PASS:-portal_P@ssw0rd_Secure_2024!}"
 read -rsp "JWT Secret: " JWT_SECRET
 JWT_SECRET="${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}"
 read -rsp "NVIDIA API Key: " NVIDIA_KEY
-read -rsp "Auth0 Client Secret: " AUTH0_SECRET
+read -rsp "Okta Client Secret: " OKTA_SECRET
 echo ""
 
 terraform apply -auto-approve \
   -var="db_password=${DB_PASS}" \
   -var="jwt_secret=${JWT_SECRET}" \
   -var="nvidia_api_key=${NVIDIA_KEY}" \
-  -var="auth0_client_secret=${AUTH0_SECRET}"
+  -var="okta_client_secret=${OKTA_SECRET}" \
+  -var="deploy_serverless=true"
 
 # ── 5. Get Terraform outputs ─────────────────────────────────────────────────
 echo ""
@@ -70,37 +70,12 @@ echo "  Redis Host : ${REDIS_HOST}"
 echo "  SQL Conn   : ${SQL_CONN}"
 echo "  AR URL     : ${AR_URL}"
 
-# Update configmap with real Redis host
-if [ -n "${REDIS_HOST}" ]; then
-  cd "$(dirname "$0")/../.."
-  sed -i.bak "s|REPLACE_WITH_MEMORYSTORE_IP|${REDIS_HOST}|g" \
-    infrastructure/k8s/configmap.yaml
-  echo "  Updated configmap.yaml with Memorystore IP"
-fi
-
-# ── 6. Configure kubectl ─────────────────────────────────────────────────────
-echo ""
-echo ">>> Step 5: Configuring kubectl"
-gcloud container clusters get-credentials enterprise-portal-cluster \
-  --region "${REGION}" --project "${PROJECT_ID}"
-
-# ── 7. Apply K8s manifests ───────────────────────────────────────────────────
-echo ""
-echo ">>> Step 6: Deploying to GKE"
-kubectl apply -f infrastructure/k8s/namespace.yaml
-kubectl apply -f infrastructure/k8s/configmap.yaml
-kubectl apply -f infrastructure/k8s/api-gateway.yaml
-kubectl apply -f infrastructure/k8s/frontend.yaml
-kubectl apply -f infrastructure/k8s/services.yaml
-kubectl apply -f infrastructure/k8s/ingress.yaml
-kubectl apply -f infrastructure/k8s/pdb.yaml
-
 echo ""
 echo "================================================================"
 echo " Setup complete!"
 echo ""
 terraform output setup_summary 2>/dev/null || true
 echo ""
-echo " Next: Push Docker images and trigger Jenkins pipeline."
+echo " Next: trigger Jenkins. Jenkins will run Cloud Build and deploy Cloud Run."
 echo " Jenkins access: gcloud compute ssh jenkins-server --tunnel-through-iap --zone ${REGION}-a -- -L 8080:localhost:8080"
 echo "================================================================"

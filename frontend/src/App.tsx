@@ -1,9 +1,10 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { useAuth0 } from '@auth0/auth0-react';
 import { ThemeProvider, createTheme, CssBaseline, CircularProgress, Box } from '@mui/material';
+import { useAuth } from './contexts/AuthContext';
 import Layout from './components/Layout/Layout';
 import Login from './pages/Login';
+import OktaCallback from './pages/OktaCallback';
 import Dashboard from './pages/Dashboard';
 import DataBrowser from './pages/DataBrowser';
 import FileUpload from './pages/FileUpload';
@@ -34,7 +35,7 @@ const theme = createTheme({
 });
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading } = useAuth0();
+  const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
     return (
@@ -48,7 +49,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { isLoading } = useAuth0();
+  const { isLoading } = useAuth();
 
   if (isLoading) {
     return (
@@ -67,6 +68,7 @@ export default function App() {
       <CssBaseline />
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/authorization-code/callback" element={<OktaCallback />} />
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard"    element={<Dashboard />} />

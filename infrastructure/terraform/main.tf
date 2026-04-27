@@ -41,9 +41,8 @@ resource "google_project_service" "apis" {
     "networkmanagement.googleapis.com",
 
     # Containers / Build
-    "container.googleapis.com",        # GKE
     "artifactregistry.googleapis.com", # Artifact Registry
-    "cloudbuild.googleapis.com",       # Cloud Build (CI alt)
+    "cloudbuild.googleapis.com",       # Cloud Build deployment runner
 
     # Data
     "sqladmin.googleapis.com", # Cloud SQL
@@ -55,11 +54,8 @@ resource "google_project_service" "apis" {
     "pubsub.googleapis.com", # Cloud Pub/Sub
 
     # Serverless
-    "run.googleapis.com",            # Cloud Run
-    "cloudfunctions.googleapis.com", # Cloud Functions Gen2
-    "cloudscheduler.googleapis.com", # Cloud Scheduler
-    "cloudtasks.googleapis.com",     # Cloud Tasks
-    "eventarc.googleapis.com",       # required by Functions Gen2
+    "run.googleapis.com",       # Cloud Run
+    "vpcaccess.googleapis.com", # Serverless VPC Access for Cloud Run -> private SQL/Redis
 
     # Security
     "secretmanager.googleapis.com", # Secret Manager
@@ -69,7 +65,6 @@ resource "google_project_service" "apis" {
     "dns.googleapis.com",                # Cloud DNS
     "iap.googleapis.com",                # Identity-Aware Proxy
     "certificatemanager.googleapis.com", # Cert Manager
-    "cloudarmor.googleapis.com",         # Cloud Armor (via compute)
 
     # Observability
     "monitoring.googleapis.com",    # Cloud Monitoring
@@ -99,14 +94,6 @@ resource "google_compute_subnetwork" "portal_subnet" {
   network                  = google_compute_network.portal_vpc.id
   private_ip_google_access = true # Allow access to Google APIs without public IP
 
-  secondary_ip_range {
-    range_name    = "pods"
-    ip_cidr_range = "10.1.0.0/16"
-  }
-  secondary_ip_range {
-    range_name    = "services"
-    ip_cidr_range = "10.2.0.0/20"
-  }
 }
 
 # Jenkins subnet (separate for isolation)
@@ -117,7 +104,7 @@ resource "google_compute_subnetwork" "jenkins_subnet" {
   network       = google_compute_network.portal_vpc.id
 }
 
-# ─── Cloud NAT (outbound internet for private GKE nodes) ──────────────────────
+# ─── Cloud NAT (outbound internet for private serverless/VPC workloads) ───────
 
 resource "google_compute_router" "portal_router" {
   name    = "enterprise-portal-router"
@@ -196,153 +183,6 @@ resource "google_compute_firewall" "allow_health_checks" {
     protocol = "tcp"
   }
   source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
-}
-
-# ─── GKE Cluster ─────────────────────────────────────────────────────────────
-
-resource "google_container_cluster" "portal_cluster" {
-  provider = google-beta
-  name     = var.cluster_name
-  location = var.region # Regional = multi-zone HA
-
-  network    = google_compute_network.portal_vpc.id
-  subnetwork = google_compute_subnetwork.portal_subnet.id
-
-  remove_default_node_pool = true
-  initial_node_count       = 1
-
-  # Private cluster — nodes have no public IPs
-  private_cluster_config {
-    enable_private_nodes    = true
-    enable_private_endpoint = false
-    master_ipv4_cidr_block  = "172.16.0.0/28"
-  }
-
-  master_authorized_networks_config {
-    cidr_blocks {
-      cidr_block   = "0.0.0.0/0"
-      display_name = "all"
-    }
-  }
-
-  ip_allocation_policy {
-    cluster_secondary_range_name  = "pods"
-    services_secondary_range_name = "services"
-  }
-
-  workload_identity_config {
-    workload_pool = "${var.project_id}.svc.id.goog"
-  }
-
-  addons_config {
-    horizontal_pod_autoscaling { disabled = false }
-    http_load_balancing { disabled = false }
-    gce_persistent_disk_csi_driver_config { enabled = true }
-    gcs_fuse_csi_driver_config { enabled = true }
-  }
-
-  logging_config {
-    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS", "APISERVER"]
-  }
-
-  monitoring_config {
-    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
-    managed_prometheus { enabled = true }
-  }
-
-  release_channel {
-    channel = "REGULAR"
-  }
-
-  # Binary Authorization — only signed images
-  binary_authorization {
-    evaluation_mode = "DISABLED" # Set to PROJECT_SINGLETON_POLICY_ENFORCE for prod
-  }
-
-  cost_management_config {
-    enabled = true
-  }
-
-  depends_on = [google_project_service.apis]
-}
-
-resource "google_container_node_pool" "portal_nodes" {
-  name     = "portal-node-pool"
-  cluster  = google_container_cluster.portal_cluster.id
-  location = var.region
-
-  node_count = var.node_count
-
-  autoscaling {
-    min_node_count  = var.min_node_count
-    max_node_count  = var.max_node_count
-    location_policy = "BALANCED"
-  }
-
-  management {
-    auto_repair  = true
-    auto_upgrade = true
-  }
-
-  upgrade_settings {
-    max_surge       = 2
-    max_unavailable = 0
-    strategy        = "SURGE"
-  }
-
-  node_config {
-    machine_type = var.machine_type
-    disk_size_gb = 100
-    disk_type    = "pd-ssd"
-
-    service_account = google_service_account.gke_node_sa.email
-    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-
-    workload_metadata_config {
-      mode = "GKE_METADATA"
-    }
-
-    labels = {
-      environment = var.environment
-      app         = "enterprise-portal"
-    }
-
-    shielded_instance_config {
-      enable_secure_boot          = true
-      enable_integrity_monitoring = true
-    }
-  }
-}
-
-# ─── IAM — GKE Node Service Account ──────────────────────────────────────────
-
-resource "google_service_account" "gke_node_sa" {
-  account_id   = "enterprise-portal-gke-sa"
-  display_name = "Enterprise Portal GKE Node SA"
-}
-
-resource "google_project_iam_member" "gke_node_roles" {
-  for_each = toset([
-    "roles/logging.logWriter",
-    "roles/monitoring.metricWriter",
-    "roles/monitoring.viewer",
-    "roles/artifactregistry.reader",
-    "roles/storage.objectAdmin",
-    "roles/secretmanager.secretAccessor",
-    "roles/pubsub.publisher",
-    "roles/pubsub.subscriber",
-    "roles/cloudtrace.agent",
-  ])
-  project = var.project_id
-  role    = each.key
-  member  = "serviceAccount:${google_service_account.gke_node_sa.email}"
-}
-
-# Workload Identity binding for Kubernetes service account
-resource "google_service_account_iam_member" "workload_identity" {
-  service_account_id = google_service_account.gke_node_sa.name
-  role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.project_id}.svc.id.goog[enterprise-portal/portal-ksa]"
 }
 
 # ─── Cloud SQL (PostgreSQL 15) ────────────────────────────────────────────────
@@ -479,16 +319,8 @@ resource "google_secret_manager_secret_version" "nvidia_api_key" {
   secret_data = var.nvidia_api_key
 }
 
-resource "google_secret_manager_secret" "auth0_client_secret" {
-  secret_id = "portal-auth0-client-secret"
-  replication {
-    auto {}
-  }
-}
-
-resource "google_secret_manager_secret_version" "auth0_client_secret" {
-  secret      = google_secret_manager_secret.auth0_client_secret.id
-  secret_data = var.auth0_client_secret
+data "google_secret_manager_secret" "okta_client_secret" {
+  secret_id = "portal-okta-client-secret"
 }
 
 # ─── Cloud Storage (File Uploads + Static Assets) ────────────────────────────
@@ -537,13 +369,6 @@ resource "google_storage_bucket" "tfstate" {
 
   uniform_bucket_level_access = true
   versioning { enabled = true }
-}
-
-# IAM: GKE SA can read/write files bucket
-resource "google_storage_bucket_iam_member" "portal_files_gke" {
-  bucket = google_storage_bucket.portal_files.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gke_node_sa.email}"
 }
 
 # ─── Cloud Memorystore (Redis 7) ──────────────────────────────────────────────
@@ -599,7 +424,7 @@ resource "google_pubsub_subscription" "file_events_sub" {
   topic = google_pubsub_topic.file_events.name
 
   ack_deadline_seconds       = 60
-  message_retention_duration = "86600s"
+  message_retention_duration = "86400s"
   retain_acked_messages      = false
 
   expiration_policy {
@@ -677,8 +502,8 @@ resource "google_service_account" "jenkins_sa" {
 
 resource "google_project_iam_member" "jenkins_roles" {
   for_each = toset([
-    "roles/container.developer",          # Deploy to GKE
-    "roles/artifactregistry.writer",      # Push Docker images
+    "roles/cloudbuild.builds.editor",     # Trigger Cloud Build
+    "roles/artifactregistry.writer",      # Push/read Docker images when needed
     "roles/storage.objectAdmin",          # Access GCS
     "roles/secretmanager.secretAccessor", # Read secrets
     "roles/cloudsql.client",              # Connect to Cloud SQL
@@ -699,8 +524,8 @@ resource "google_compute_instance" "jenkins" {
   boot_disk {
     initialize_params {
       image = "debian-cloud/debian-12"
-      size  = 100
-      type  = "pd-ssd"
+      size  = 50
+      type  = "pd-standard"
     }
   }
 
@@ -737,14 +562,10 @@ resource "google_compute_instance" "jenkins" {
     curl -fsSL https://get.docker.com | bash
     usermod -aG docker jenkins
 
-    # ── kubectl ──────────────────────────────────────────
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-    chmod +x kubectl && mv kubectl /usr/local/bin/
-
     # ── gcloud SDK ───────────────────────────────────────
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
     curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-    apt-get update -y && apt-get install -y google-cloud-sdk google-cloud-sdk-gke-gcloud-auth-plugin
+    apt-get update -y && apt-get install -y google-cloud-sdk
 
     # ── Trivy (security scanner) ─────────────────────────
     wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | tee /usr/share/keyrings/trivy.gpg > /dev/null
@@ -786,7 +607,8 @@ resource "google_iap_tunnel_instance_iam_binding" "jenkins_iap" {
 # ─── Cloud Armor (WAF + DDoS Protection) ─────────────────────────────────────
 
 resource "google_compute_security_policy" "portal_armor" {
-  name = "enterprise-portal-armor"
+  count = var.enable_cloud_armor ? 1 : 0
+  name  = "enterprise-portal-armor"
 
   # Block known malicious IPs (geo-restrict if needed)
   rule {
@@ -866,20 +688,20 @@ resource "google_monitoring_notification_channel" "email" {
 }
 
 resource "google_monitoring_alert_policy" "high_cpu" {
-  display_name = "Portal — High CPU Usage"
+  display_name = "Portal — Cloud Run High CPU Usage"
   combiner     = "OR"
   enabled      = true
 
   conditions {
-    display_name = "CPU > 80% for 5 minutes"
+    display_name = "Cloud Run CPU > 80% for 5 minutes"
     condition_threshold {
-      filter          = "resource.type=\"k8s_container\" AND metric.type=\"kubernetes.io/container/cpu/core_usage_time\""
+      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/container/cpu/utilizations\""
       duration        = "300s"
       comparison      = "COMPARISON_GT"
       threshold_value = 0.8
       aggregations {
         alignment_period   = "60s"
-        per_series_aligner = "ALIGN_RATE"
+        per_series_aligner = "ALIGN_PERCENTILE_95"
       }
     }
   }
@@ -888,21 +710,21 @@ resource "google_monitoring_alert_policy" "high_cpu" {
   depends_on            = [google_project_service.apis]
 }
 
-resource "google_monitoring_alert_policy" "pod_restarts" {
-  display_name = "Portal — Pod Restart Loop"
+resource "google_monitoring_alert_policy" "cloud_run_errors" {
+  display_name = "Portal — Cloud Run 5xx Errors"
   combiner     = "OR"
   enabled      = true
 
   conditions {
-    display_name = "Container restarts > 5 in 10 min"
+    display_name = "5xx responses > 10 in 10 min"
     condition_threshold {
-      filter          = "resource.type=\"k8s_container\" AND metric.type=\"kubernetes.io/container/restart_count\""
+      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"run.googleapis.com/request_count\" AND metric.labels.response_code_class=\"5xx\""
       duration        = "600s"
       comparison      = "COMPARISON_GT"
-      threshold_value = 5
+      threshold_value = 10
       aggregations {
         alignment_period   = "60s"
-        per_series_aligner = "ALIGN_RATE"
+        per_series_aligner = "ALIGN_SUM"
       }
     }
   }
@@ -946,8 +768,7 @@ resource "google_dns_managed_zone" "portal_zone" {
   depends_on = [google_project_service.apis]
 }
 
-# DNS record will be created after GKE ingress gets an IP
-# Add via: gcloud dns record-sets transaction ...
+# DNS record can point at the frontend Cloud Run URL or a serverless NEG/load balancer.
 
 # ─── Cloud Logging — Log Sink ─────────────────────────────────────────────────
 
@@ -966,7 +787,7 @@ resource "google_storage_bucket" "logs_bucket" {
 resource "google_logging_project_sink" "portal_sink" {
   name        = "enterprise-portal-log-sink"
   destination = "storage.googleapis.com/${google_storage_bucket.logs_bucket.name}"
-  filter      = "resource.labels.namespace_name=\"enterprise-portal\""
+  filter      = "resource.type=\"cloud_run_revision\" OR resource.type=\"cloudsql_database\" OR resource.type=\"redis_instance\""
 
   unique_writer_identity = true
 }

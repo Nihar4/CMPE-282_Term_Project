@@ -38,7 +38,7 @@ Open a GitHub issue with:
 - a short title,
 - reproduction steps,
 - expected vs. actual behavior,
-- relevant logs (`docker compose logs <svc>` or `kubectl logs`).
+- relevant logs (`docker compose logs <svc>` or Cloud Run logs).
 
 For security findings, please use the private "Report a vulnerability" flow
 in GitHub Security instead of a public issue.

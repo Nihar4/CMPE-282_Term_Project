@@ -1,0 +1,67 @@
+<?xml version='1.1' encoding='UTF-8'?>
+<hudson>
+  <disabledAdministrativeMonitors>
+    <string>hudson.util.DoubleLaunchChecker</string>
+  </disabledAdministrativeMonitors>
+  <version>2.555.1</version>
+  <numExecutors>2</numExecutors>
+  <mode>NORMAL</mode>
+  <useSecurity>true</useSecurity>
+  <authorizationStrategy class="hudson.security.FullControlOnceLoggedInAuthorizationStrategy">
+    <denyAnonymousReadAccess>true</denyAnonymousReadAccess>
+  </authorizationStrategy>
+  <securityRealm class="org.jenkinsci.plugins.saml.SamlSecurityRealm" plugin="saml@4.595.vec7523b_5d543">
+    <displayNameAttributeName>http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name</displayNameAttributeName>
+    <groupsAttributeName>http://schemas.xmlsoap.org/claims/Group</groupsAttributeName>
+    <maximumAuthenticationLifetime>86400</maximumAuthenticationLifetime>
+    <usernameCaseConversion>none</usernameCaseConversion>
+    <binding>urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect</binding>
+    <idpMetadataConfiguration>
+      <xml>&lt;md:EntityDescriptor xmlns:md=&quot;urn:oasis:names:tc:SAML:2.0:metadata&quot; entityID=&quot;http://www.okta.com/exk12ciyyb22d71TF698&quot;&gt;
+&lt;md:IDPSSODescriptor WantAuthnRequestsSigned=&quot;false&quot; protocolSupportEnumeration=&quot;urn:oasis:names:tc:SAML:2.0:protocol&quot;&gt;
+&lt;md:KeyDescriptor use=&quot;signing&quot;&gt;
+&lt;ds:KeyInfo xmlns:ds=&quot;http://www.w3.org/2000/09/xmldsig#&quot;&gt;
+&lt;ds:X509Data&gt;
+&lt;ds:X509Certificate&gt;MIIDqjCCApKgAwIBAgIGAZ3MZdTUMA0GCSqGSIb3DQEBCwUAMIGVMQswCQYDVQQGEwJVUzETMBEG A1UECAwKQ2FsaWZvcm5pYTEWMBQGA1UEBwwNU2FuIEZyYW5jaXNjbzENMAsGA1UECgwET2t0YTEU MBIGA1UECwwLU1NPUHJvdmlkZXIxFjAUBgNVBAMMDXRyaWFsLTU0MTM0NjcxHDAaBgkqhkiG9w0B CQEWDWluZm9Ab2t0YS5jb20wHhcNMjYwNDI3MDA0NDE4WhcNMzYwNDI3MDA0NTE4WjCBlTELMAkG A1UEBhMCVVMxEzARBgNVBAgMCkNhbGlmb3JuaWExFjAUBgNVBAcMDVNhbiBGcmFuY2lzY28xDTAL BgNVBAoMBE9rdGExFDASBgNVBAsMC1NTT1Byb3ZpZGVyMRYwFAYDVQQDDA10cmlhbC01NDEzNDY3 MRwwGgYJKoZIhvcNAQkBFg1pbmZvQG9rdGEuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB CgKCAQEAsZ+zYJe9LukqT2m8NdXhrlj0yDDoUifLkKSToYTsT6CmrNOaT0Aia24pZihTOuMRNeMw bXL3EV5OcBcTCqvnv15cHHYQVLS3fhXGlhVCTP1vKbuo/ZFtJKZTezZB39MlRT8qNu6ttN8/CdYK xe8Bj6TfINVoip4S2Rv97AONn6YWOWW21kTVn7Dq/3zycOnkSbY360XZ/lSgvrIFHHxCBdhGDd+C 0V+YdlP4iVwKbG7cBKFUPFIpWfeM04CDWKUlkoDzS9dJ7rEz5JyNUU7iTMX/oqbyg7DxOPmckepm CoupnSH012V5Y9L0KZ/59OLrSC0HVX7ISfGaUEJnPCIvcQIDAQABMA0GCSqGSIb3DQEBCwUAA4IB AQAbeyzTfue93CLYAjJcvZHX7FA6lnUehVVpgnp/DWPtPldV5IZ1FXZMsvSkWJakQxYmylBoSZc6 8VTDFXZiiOiNNPDlLGfRC7UuYM6mTJ8V+5Th/Fp/p77EQJdEo3q00vr6SvtBUq5eZk99fskQ385F 9UlHb53mQlb1uZb/UJsgVrtEoZSE/LjieMKI/AQsn51ghCxdCr3adHYTKgu9g7ksXw9LHYXFZkTD k5b2qc+W5QlldIMe9INpdBcEBxxQlKd/lRMSdk0BCUuYnUKnPrOOjk1s7tvPhjDAfK5cuHIAq+OO AH9dErMSEq65ZTirE1Da62WwQ7HRO+HZK+FaXm31&lt;/ds:X509Certificate&gt;
+&lt;/ds:X509Data&gt;
+&lt;/ds:KeyInfo&gt;
+&lt;/md:KeyDescriptor&gt;
+&lt;md:NameIDFormat&gt;urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified&lt;/md:NameIDFormat&gt;
+&lt;md:NameIDFormat&gt;urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress&lt;/md:NameIDFormat&gt;
+&lt;md:SingleSignOnService Binding=&quot;urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST&quot; Location=&quot;https://trial-5413467.okta.com/app/trial-5413467_jenkins_1/exk12ciyyb22d71TF698/sso/saml&quot;/&gt;
+&lt;md:SingleSignOnService Binding=&quot;urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect&quot; Location=&quot;https://trial-5413467.okta.com/app/trial-5413467_jenkins_1/exk12ciyyb22d71TF698/sso/saml&quot;/&gt;
+&lt;/md:IDPSSODescriptor&gt;
+&lt;/md:EntityDescriptor&gt;</xml>
+      <url></url>
+      <period>0</period>
+    </idpMetadataConfiguration>
+    <properties/>
+  </securityRealm>
+  <disableRememberMe>false</disableRememberMe>
+  <projectNamingStrategy class="jenkins.model.ProjectNamingStrategy$DefaultProjectNamingStrategy"/>
+  <workspaceDir>${JENKINS_HOME}/workspace/${ITEM_FULL_NAME}</workspaceDir>
+  <buildsDir>${ITEM_ROOTDIR}/builds</buildsDir>
+  <markupFormatter class="hudson.markup.EscapedMarkupFormatter"/>
+  <jdks/>
+  <viewsTabBar class="hudson.views.DefaultViewsTabBar"/>
+  <myViewsTabBar class="hudson.views.DefaultMyViewsTabBar"/>
+  <clouds/>
+  <quietPeriod>5</quietPeriod>
+  <scmCheckoutRetryCount>0</scmCheckoutRetryCount>
+  <views>
+    <hudson.model.AllView>
+      <owner class="hudson" reference="../../.."/>
+      <name>all</name>
+      <filterExecutors>false</filterExecutors>
+      <filterQueue>false</filterQueue>
+      <properties class="hudson.model.View$PropertyList"/>
+    </hudson.model.AllView>
+  </views>
+  <primaryView>all</primaryView>
+  <slaveAgentPort>50000</slaveAgentPort>
+  <label></label>
+  <crumbIssuer class="hudson.security.csrf.DefaultCrumbIssuer"/>
+  <nodeProperties/>
+  <globalNodeProperties/>
+  <nodeRenameMigrationNeeded>false</nodeRenameMigrationNeeded>
+</hudson>

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -10,12 +11,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -48,17 +52,62 @@ type FileChunk struct {
 
 func (FileChunk) TableName() string { return "file_chunks" }
 
+type AIJobRequest struct {
+	JobID       string    `json:"job_id"`
+	UserID      string    `json:"user_id,omitempty"`
+	Question    string    `json:"question"`
+	FileIDs     []string  `json:"file_ids,omitempty"`
+	Mode        string    `json:"mode,omitempty"`
+	IncludeDocs bool      `json:"include_docs,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type AIJobResult struct {
+	JobID        string    `json:"job_id"`
+	Status       string    `json:"status"`
+	Question     string    `json:"question"`
+	Answer       string    `json:"answer,omitempty"`
+	Reasoning    string    `json:"reasoning,omitempty"`
+	GeneratedSQL string    `json:"generated_sql,omitempty"`
+	ResultCount  int       `json:"result_count"`
+	Mode         string    `json:"mode"`
+	Error        string    `json:"error,omitempty"`
+	ExecutionMS  int       `json:"execution_time"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type NotificationEvent struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id,omitempty"`
+	Type      string    `json:"type"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Icon      string    `json:"icon"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Port          string
-	DBDSN         string
-	NvidiaAPIKey  string
-	NvidiaBaseURL string
-	NvidiaModel   string
+	Port              string
+	DBDSN             string
+	NvidiaAPIKey      string
+	NvidiaBaseURL     string
+	NvidiaModel       string
+	RedisURL          string
+	RedisAuth         string
+	KafkaBrokers      []string
+	AIRequestsTopic   string
+	NotificationsTopic string
+	AIConsumerGroup   string
+	AIWorkerEnabled   bool
 }
 
 func loadConfig() *Config {
+	brokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
+	for i := range brokers {
+		brokers[i] = strings.TrimSpace(brokers[i])
+	}
 	return &Config{
 		Port: getEnv("PORT", "8084"),
 		DBDSN: fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable TimeZone=UTC",
@@ -68,9 +117,16 @@ func loadConfig() *Config {
 			getEnv("DB_PASSWORD", "portal_password"),
 			getEnv("DB_NAME", "enterprise_portal"),
 		),
-		NvidiaAPIKey:  getEnv("NVIDIA_API_KEY", ""),
-		NvidiaBaseURL: getEnv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-		NvidiaModel:   getEnv("NVIDIA_MODEL", "moonshotai/kimi-k2-instruct"),
+		NvidiaAPIKey:      getEnv("NVIDIA_API_KEY", ""),
+		NvidiaBaseURL:     getEnv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+		NvidiaModel:       getEnv("NVIDIA_MODEL", "moonshotai/kimi-k2-instruct"),
+		RedisURL:          getEnv("REDIS_URL", "localhost:6379"),
+		RedisAuth:         getEnv("REDIS_AUTH", ""),
+		KafkaBrokers:      brokers,
+		AIRequestsTopic:   getEnv("AI_REQUESTS_TOPIC", "portal.ai.requests"),
+		NotificationsTopic: getEnv("NOTIFICATIONS_TOPIC", "portal.notifications"),
+		AIConsumerGroup:   getEnv("AI_CONSUMER_GROUP", "portal-ai-workers"),
+		AIWorkerEnabled:   getEnv("AI_WORKER_ENABLED", "true") == "true",
 	}
 }
 
@@ -319,9 +375,71 @@ Table: file_chunks
 // ─── AI Handler ───────────────────────────────────────────────────────────────
 
 type AIHandler struct {
-	db     *gorm.DB
-	nvidia *NvidiaClient
-	sqlDB  *sql.DB
+	db                 *gorm.DB
+	nvidia             *NvidiaClient
+	sqlDB              *sql.DB
+	rdb                *redis.Client
+	cfg                *Config
+	aiWriter           *kafka.Writer
+	notificationWriter *kafka.Writer
+}
+
+func (h *AIHandler) jobKey(jobID string) string {
+	return "ai_job:" + jobID
+}
+
+func (h *AIHandler) saveJobResult(ctx context.Context, result AIJobResult) {
+	if h.rdb == nil {
+		return
+	}
+	result.UpdatedAt = time.Now().UTC()
+	payload, err := json.Marshal(result)
+	if err != nil {
+		log.Printf("[AI] could not marshal job result: %v", err)
+		return
+	}
+	if err := h.rdb.Set(ctx, h.jobKey(result.JobID), payload, 24*time.Hour).Err(); err != nil {
+		log.Printf("[AI] could not save job %s to Redis: %v", result.JobID, err)
+	}
+}
+
+func (h *AIHandler) getJobResult(ctx context.Context, jobID string) (*AIJobResult, error) {
+	if h.rdb == nil {
+		return nil, fmt.Errorf("Redis is not configured")
+	}
+	payload, err := h.rdb.Get(ctx, h.jobKey(jobID)).Bytes()
+	if err != nil {
+		return nil, err
+	}
+	var result AIJobResult
+	if err := json.Unmarshal(payload, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (h *AIHandler) publishNotification(ctx context.Context, event NotificationEvent) {
+	if h.notificationWriter == nil {
+		return
+	}
+	if event.ID == "" {
+		event.ID = uuid.NewString()
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("[AI] could not marshal notification: %v", err)
+		return
+	}
+	if err := h.notificationWriter.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(event.ID),
+		Value: payload,
+		Time:  event.CreatedAt,
+	}); err != nil {
+		log.Printf("[AI] notification publish failed: %v", err)
+	}
 }
 
 // POST /api/ai/query — natural language → SQL → results (non-streaming)
@@ -336,14 +454,34 @@ func (h *AIHandler) Query(c *gin.Context) {
 		return
 	}
 
-	start := time.Now()
-	userID := c.GetHeader("X-User-ID")
+	result := h.runAIRequest(AIJobRequest{
+		JobID:     uuid.NewString(),
+		UserID:    c.GetHeader("X-User-ID"),
+		Question:  req.Question,
+		FileIDs:   req.FileIDs,
+		Mode:      req.Mode,
+		CreatedAt: time.Now().UTC(),
+	})
 
+	c.JSON(http.StatusOK, gin.H{
+		"answer":         result.Answer,
+		"reasoning":      result.Reasoning,
+		"generated_sql":  result.GeneratedSQL,
+		"result_count":   result.ResultCount,
+		"mode":           result.Mode,
+		"execution_time": result.ExecutionMS,
+		"status":         result.Status,
+		"error":          result.Error,
+	})
+}
+
+func (h *AIHandler) runAIRequest(req AIJobRequest) AIJobResult {
+	start := time.Now()
 	mode := req.Mode
 	if mode == "" {
 		mode = "nl_to_sql"
-		if len(req.FileIDs) > 0 {
-			mode = "document_qa"
+		if len(req.FileIDs) > 0 || req.IncludeDocs {
+			mode = "db_and_docs"
 		}
 	}
 
@@ -354,6 +492,8 @@ func (h *AIHandler) Query(c *gin.Context) {
 	switch mode {
 	case "nl_to_sql":
 		answer, generatedSQL, resultCount, reasoning, queryErr = h.handleNLToSQL(req.Question)
+	case "db_and_docs":
+		answer, generatedSQL, resultCount, reasoning, queryErr = h.handleDBAndFullDocs(req.Question, req.FileIDs)
 	case "document_qa":
 		answer, reasoning, queryErr = h.handleDocumentQA(req.Question, req.FileIDs)
 	default:
@@ -373,9 +513,10 @@ func (h *AIHandler) Query(c *gin.Context) {
 
 	// Save history
 	var uid *uuid.UUID
-	if userID != "" {
-		id, _ := uuid.Parse(userID)
-		uid = &id
+	if req.UserID != "" {
+		if id, err := uuid.Parse(req.UserID); err == nil {
+			uid = &id
+		}
 	}
 	h.db.Create(&QueryHistory{
 		UserID:        uid,
@@ -389,14 +530,217 @@ func (h *AIHandler) Query(c *gin.Context) {
 		ErrorMessage:  errMsg,
 	})
 
-	c.JSON(http.StatusOK, gin.H{
-		"answer":         answer,
-		"reasoning":      reasoning,
-		"generated_sql":  generatedSQL,
-		"result_count":   resultCount,
-		"mode":           mode,
-		"execution_time": elapsed,
+	return AIJobResult{
+		JobID:        req.JobID,
+		Status:       status,
+		Question:     req.Question,
+		Answer:       answer,
+		Reasoning:    reasoning,
+		GeneratedSQL: generatedSQL,
+		ResultCount:  resultCount,
+		Mode:         mode,
+		Error:        errMsg,
+		ExecutionMS:  elapsed,
+		UpdatedAt:    time.Now().UTC(),
+	}
+}
+
+// POST /api/ai/jobs — enqueue AI work into Kafka and return a Redis-backed job id.
+func (h *AIHandler) QueueQuery(c *gin.Context) {
+	if h.aiWriter == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Kafka AI queue is not configured"})
+		return
+	}
+
+	var req struct {
+		Question    string   `json:"question" binding:"required"`
+		FileIDs     []string `json:"file_ids"`
+		Mode        string   `json:"mode"`
+		IncludeDocs bool     `json:"include_docs"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	job := AIJobRequest{
+		JobID:       uuid.NewString(),
+		UserID:      c.GetHeader("X-User-ID"),
+		Question:    req.Question,
+		FileIDs:     req.FileIDs,
+		Mode:        req.Mode,
+		IncludeDocs: req.IncludeDocs,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	h.saveJobResult(c.Request.Context(), AIJobResult{
+		JobID:     job.JobID,
+		Status:    "queued",
+		Question:  job.Question,
+		Mode:      job.Mode,
+		UpdatedAt: time.Now().UTC(),
 	})
+
+	payload, _ := json.Marshal(job)
+	if err := h.aiWriter.WriteMessages(c.Request.Context(), kafka.Message{
+		Key:   []byte(job.JobID),
+		Value: payload,
+		Time:  job.CreatedAt,
+	}); err != nil {
+		log.Printf("[AI] Kafka enqueue failed for job %s: %v; processing locally", job.JobID, err)
+		go h.processAIJob(context.Background(), job, "local-fallback")
+		c.JSON(http.StatusAccepted, gin.H{
+			"job_id":     job.JobID,
+			"status":     "queued",
+			"status_url": "/api/ai/jobs/" + job.JobID,
+			"message":    "Kafka queue unavailable; processing with local Cloud Run fallback",
+		})
+		return
+	}
+
+	h.publishNotification(c.Request.Context(), NotificationEvent{
+		UserID: job.UserID,
+		Type:   "ai_queued",
+		Title:  "AI request queued",
+		Body:   fmt.Sprintf("%q is waiting for an AI worker", truncate(job.Question, 80)),
+		Icon:   "ai",
+	})
+
+	go func() {
+		// Give the Kafka consumer first chance; local fallback keeps dev reliable
+		// when Kafka is slow or a worker is not scaled up.
+		time.Sleep(2 * time.Second)
+		h.processAIJob(context.Background(), job, "local-fallback")
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"job_id":     job.JobID,
+		"status":     "queued",
+		"status_url": "/api/ai/jobs/" + job.JobID,
+		"message":    "AI request queued in Kafka",
+	})
+}
+
+// GET /api/ai/jobs/:id — poll Redis for queued/running/completed AI result.
+func (h *AIHandler) GetJob(c *gin.Context) {
+	result, err := h.getJobResult(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *AIHandler) startAIWorker(ctx context.Context) {
+	if !h.cfg.AIWorkerEnabled || len(h.cfg.KafkaBrokers) == 0 {
+		return
+	}
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  h.cfg.KafkaBrokers,
+		Topic:    h.cfg.AIRequestsTopic,
+		GroupID:  h.cfg.AIConsumerGroup,
+		MinBytes: 1,
+		MaxBytes: 10e6,
+		MaxWait:  1 * time.Second,
+	})
+
+	go func() {
+		defer reader.Close()
+		log.Printf("[AI] Kafka worker listening topic=%s group=%s brokers=%s",
+			h.cfg.AIRequestsTopic, h.cfg.AIConsumerGroup, strings.Join(h.cfg.KafkaBrokers, ","))
+		for {
+			msg, err := reader.FetchMessage(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[AI] Kafka fetch failed: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			var job AIJobRequest
+			if err := json.Unmarshal(msg.Value, &job); err != nil {
+				log.Printf("[AI] invalid Kafka job payload: %v", err)
+				_ = reader.CommitMessages(ctx, msg)
+				continue
+			}
+
+			h.processAIJob(ctx, job, "kafka-worker")
+
+			if err := reader.CommitMessages(ctx, msg); err != nil {
+				log.Printf("[AI] Kafka commit failed for job %s: %v", job.JobID, err)
+			}
+		}
+	}()
+}
+
+func (h *AIHandler) processAIJob(ctx context.Context, job AIJobRequest, worker string) {
+	if existing, err := h.getJobResult(ctx, job.JobID); err == nil && isTerminalJobStatus(existing.Status) {
+		log.Printf("[AI] job %s already %s, skipping worker=%s", job.JobID, existing.Status, worker)
+		return
+	}
+
+	lockKey := "ai_job_lock:" + job.JobID
+	if h.rdb != nil {
+		acquired, err := h.rdb.SetNX(ctx, lockKey, worker, 30*time.Minute).Result()
+		if err == nil && !acquired {
+			log.Printf("[AI] job %s already claimed, skipping worker=%s", job.JobID, worker)
+			return
+		}
+		if err != nil {
+			log.Printf("[AI] lock warning for job %s: %v", job.JobID, err)
+		}
+		defer h.rdb.Del(ctx, lockKey)
+	}
+
+	if existing, err := h.getJobResult(ctx, job.JobID); err == nil && isTerminalJobStatus(existing.Status) {
+		log.Printf("[AI] job %s became %s before worker=%s started, skipping", job.JobID, existing.Status, worker)
+		return
+	}
+
+	log.Printf("[AI] processing job=%s worker=%s question=%q", job.JobID, worker, job.Question)
+	h.saveJobResult(ctx, AIJobResult{
+		JobID:    job.JobID,
+		Status:   "running",
+		Question: job.Question,
+		Mode:     job.Mode,
+	})
+
+	result := h.runAIRequest(job)
+	h.saveJobResult(ctx, result)
+
+	notif := NotificationEvent{
+		UserID: job.UserID,
+		Icon:   "ai",
+	}
+	if result.Status == "success" {
+		notif.Type = "ai_query"
+		notif.Title = "AI query completed"
+		notif.Body = fmt.Sprintf("%q completed with %d result(s)", truncate(job.Question, 80), result.ResultCount)
+	} else {
+		notif.Type = "ai_error"
+		notif.Title = "AI query failed"
+		notif.Body = fmt.Sprintf("%q failed: %s", truncate(job.Question, 80), result.Error)
+		notif.Icon = "warning"
+	}
+	h.publishNotification(ctx, notif)
+	log.Printf("[AI] finished job=%s worker=%s status=%s elapsed_ms=%d", job.JobID, worker, result.Status, result.ExecutionMS)
+}
+
+func isTerminalJobStatus(status string) bool {
+	return status == "success" || status == "error"
+}
+
+func truncate(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }
 
 // handleNLToSQL implements a 2-step agent loop with timing logs:
@@ -411,14 +755,16 @@ func (h *AIHandler) handleNLToSQL(question string) (string, string, int, string,
 	sqlPrompt := []Message{
 		{
 			Role: "system",
-			Content: `You are a PostgreSQL expert. Your ONLY job is to output a single valid SQL SELECT query.
+			Content: `You are a PostgreSQL expert. Your ONLY job is to output a single read-only SQL query.
 
 ` + dbSchemaContext + `
 
-STRICT RULES:
-- Output ONLY the SQL query. Zero explanation, zero markdown, zero text before or after.
-- Start your response with SELECT or WITH — nothing else.
-- Never use DROP, DELETE, UPDATE, INSERT, ALTER, TRUNCATE.
+STRICT RULES (READ-ONLY; NO WRITES):
+- You may ONLY output SELECT, or WITH ... SELECT (CTEs that read data only). One statement only.
+- Forbidden: INSERT, UPDATE, DELETE, MERGE, COPY (write), TRUNCATE, ALTER, DROP, CREATE, REPLACE, VACUUM, REINDEX, GRANT, REVOKE, DO, CALL, EXECUTE, or any command that changes data, schema, or permissions.
+- Forbidden: SELECT ... INTO, CREATE TABLE AS, or any pattern that creates or overwrites data.
+- Output ONLY the raw SQL. Zero explanation, zero markdown, zero text before or after.
+- Start with SELECT or WITH — nothing else.
 - Always filter current records with to_date='9999-01-01' on dept_emp, titles, salaries.
 - Use LIMIT 50 unless the user asks for more.
 - PostgreSQL syntax only.`,
@@ -438,7 +784,7 @@ STRICT RULES:
 		// Retry with stricter prompt
 		t1 := time.Now()
 		retryPrompt := []Message{
-			{Role: "system", Content: "Output ONLY a SQL SELECT query for PostgreSQL. No explanation. Start with SELECT."},
+			{Role: "system", Content: "Output ONLY a single read-only PostgreSQL SELECT (or WITH ... SELECT) query. No INSERT/UPDATE/DELETE/DDL. No explanation. Start with SELECT or WITH."},
 			{Role: "user", Content: question + "\nSchema: " + dbSchemaContext},
 		}
 		sqlRaw2, _, _ := h.nvidia.ChatComplete(retryPrompt, false)
@@ -457,7 +803,7 @@ STRICT RULES:
 		// Auto-fix: send error back to LLM
 		tf := time.Now()
 		fixPrompt := []Message{
-			{Role: "system", Content: "Fix the PostgreSQL SQL error. Output ONLY the corrected SQL, no explanation."},
+			{Role: "system", Content: "Fix the PostgreSQL SQL error. Output ONLY a single read-only SELECT or WITH ... SELECT. No INSERT/UPDATE/DELETE/DDL. No explanation."},
 			{Role: "user", Content: fmt.Sprintf("Failed SQL:\n%s\n\nError: %v\n\nCorrected SQL:", generatedSQL, err)},
 		}
 		fixedRaw, _, _ := h.nvidia.ChatComplete(fixPrompt, false)
@@ -538,38 +884,48 @@ STRICT RULES:
 	return answer, generatedSQL, resultCount, reasoning, nil
 }
 
-func (h *AIHandler) handleDocumentQA(question string, fileIDs []string) (string, string, error) {
-	// Retrieve relevant chunks
-	var chunks []FileChunk
-	q := h.db.Model(&FileChunk{})
-	if len(fileIDs) > 0 {
-		q = q.Where("file_id IN ?", fileIDs)
-	}
-	// Full-text search within chunks
-	q = q.Where("to_tsvector('english', content) @@ plainto_tsquery('english', ?)", question)
-	q.Order("chunk_index").Limit(8).Find(&chunks)
-
-	if len(chunks) == 0 {
-		// Fallback: just get first few chunks
-		h.db.Model(&FileChunk{}).Where("file_id IN ?", fileIDs).
-			Order("chunk_index").Limit(5).Find(&chunks)
-	}
-
-	var contextBuilder strings.Builder
-	for _, ch := range chunks {
-		contextBuilder.WriteString(ch.Content)
-		contextBuilder.WriteString("\n\n---\n\n")
-	}
-	context := contextBuilder.String()
-	if context == "" {
-		context = "No document content available."
-	}
+func (h *AIHandler) handleDBAndFullDocs(question string, fileIDs []string) (string, string, int, string, error) {
+	dbAnswer, generatedSQL, resultCount, reasoning, dbErr := h.handleNLToSQL(question)
+	docContext := h.loadHybridDocumentContext(question, fileIDs, 5)
 
 	messages := []Message{
 		{
 			Role: "system",
-			Content: `You are a helpful enterprise knowledge assistant. Answer questions based strictly on the provided document context.
-If the answer is not in the context, say so clearly. Be precise and cite relevant data when available.`,
+			Content: `You are an enterprise assistant that can compare database results with uploaded documents.
+Use BOTH sources:
+1. Database answer and generated SQL.
+2. The top retrieved document chunks.
+
+Important rules:
+- Do not say the answer is missing unless it is missing from both the retrieved document chunks and database answer below.
+- If the user asks for relationships between documents and database, compare names, emails, course/employee-like fields, dates, departments, IDs, and other overlapping values.
+- Clearly separate "Database evidence", "Document evidence", and "Relationship / conclusion" when useful.
+- If the database is unrelated to the uploaded documents, say that clearly and explain why.`,
+		},
+		{
+			Role: "user",
+			Content: fmt.Sprintf("Question: %s\n\n## Database Answer\n%s\n\n## Generated SQL\n%s\n\n## Top Document Chunks\n%s",
+				question, dbAnswer, generatedSQL, docContext),
+		},
+	}
+
+	answer, extraReasoning, err := h.nvidia.ChatComplete(messages, true)
+	if reasoning == "" {
+		reasoning = extraReasoning
+	}
+	if dbErr != nil && err == nil {
+		err = dbErr
+	}
+	return answer, generatedSQL, resultCount, reasoning, err
+}
+
+func (h *AIHandler) handleDocumentQA(question string, fileIDs []string) (string, string, error) {
+	context := h.loadHybridDocumentContext(question, fileIDs, 5)
+	messages := []Message{
+		{
+			Role: "system",
+			Content: `You are a helpful enterprise knowledge assistant. Answer questions using the retrieved document chunks.
+The chunks were selected with hybrid search and capped to the top 5. If the answer is not present in the context, say so clearly.`,
 		},
 		{
 			Role: "user",
@@ -579,6 +935,157 @@ If the answer is not in the context, say so clearly. Be precise and cite relevan
 
 	answer, reasoning, err := h.nvidia.ChatComplete(messages, true)
 	return answer, reasoning, err
+}
+
+func (h *AIHandler) loadHybridDocumentContext(question string, fileIDs []string, limit int) string {
+	type RetrievedDocChunk struct {
+		ID         string `gorm:"column:id"`
+		FileName   string `gorm:"column:file_name"`
+		ChunkIndex int    `gorm:"column:chunk_index"`
+		Content    string `gorm:"column:content"`
+	}
+
+	if limit <= 0 {
+		limit = 5
+	}
+
+	queryTokens := tokenizeForSearch(question)
+	chunkByID := map[string]RetrievedDocChunk{}
+	scoreByID := map[string]int{}
+
+	base := h.db.Table("file_chunks AS fc").
+		Select("fc.id::text AS id, uf.original_name AS file_name, fc.chunk_index, fc.content").
+		Joins("JOIN uploaded_files AS uf ON uf.id = fc.file_id").
+		Where("uf.status = ?", "ready")
+	if len(fileIDs) > 0 {
+		base = base.Where("fc.file_id IN ?", fileIDs)
+	}
+
+	var ftsMatches []RetrievedDocChunk
+	base.Session(&gorm.Session{}).
+		Where("to_tsvector('english', fc.content) @@ plainto_tsquery('english', ?)", question).
+		Order(gorm.Expr("ts_rank_cd(to_tsvector('english', fc.content), plainto_tsquery('english', ?)) DESC", question)).
+		Limit(20).
+		Find(&ftsMatches)
+	for rank, ch := range ftsMatches {
+		chunkByID[ch.ID] = ch
+		scoreByID[ch.ID] += 100 - rank
+	}
+
+	for _, token := range queryTokens {
+		if len(token) < 3 {
+			continue
+		}
+		var tokenMatches []RetrievedDocChunk
+		base.Session(&gorm.Session{}).
+			Where("fc.content ILIKE ?", "%"+token+"%").
+			Order("uf.created_at DESC, fc.chunk_index ASC").
+			Limit(20).
+			Find(&tokenMatches)
+		for rank, ch := range tokenMatches {
+			chunkByID[ch.ID] = ch
+			scoreByID[ch.ID] += 25 - minInt(rank, 20)
+		}
+	}
+
+	if len(chunkByID) == 0 {
+		var fallback []RetrievedDocChunk
+		base.Session(&gorm.Session{}).
+			Order("uf.created_at DESC, uf.original_name ASC, fc.chunk_index ASC").
+			Limit(limit).
+			Find(&fallback)
+		for rank, ch := range fallback {
+			chunkByID[ch.ID] = ch
+			scoreByID[ch.ID] = 1 - rank
+		}
+	}
+
+	chunks := make([]RetrievedDocChunk, 0, len(chunkByID))
+	for _, ch := range chunkByID {
+		tokenOverlap := overlapScore(queryTokens, tokenizeForSearch(ch.Content))
+		scoreByID[ch.ID] += tokenOverlap * 10
+		chunks = append(chunks, ch)
+	}
+
+	sort.SliceStable(chunks, func(i, j int) bool {
+		if scoreByID[chunks[i].ID] == scoreByID[chunks[j].ID] {
+			if chunks[i].FileName == chunks[j].FileName {
+				return chunks[i].ChunkIndex < chunks[j].ChunkIndex
+			}
+			return chunks[i].FileName < chunks[j].FileName
+		}
+		return scoreByID[chunks[i].ID] > scoreByID[chunks[j].ID]
+	})
+	if len(chunks) > limit {
+		chunks = chunks[:limit]
+	}
+
+	if len(chunks) == 0 {
+		return "No uploaded document content is available."
+	}
+
+	var sb strings.Builder
+	for _, ch := range chunks {
+		sb.WriteString(fmt.Sprintf("\n\n===== DOCUMENT: %s | Chunk %d | Score %d =====\n\n",
+			ch.FileName, ch.ChunkIndex, scoreByID[ch.ID]))
+		sb.WriteString(ch.Content)
+		sb.WriteString("\n\n")
+	}
+
+	context := strings.TrimSpace(sb.String())
+	log.Printf("[AI] Hybrid doc context loaded | top_chunks=%d | chars=%d", len(chunks), len(context))
+	return context
+}
+
+func tokenizeForSearch(s string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	stop := map[string]struct{}{
+		"the": {}, "and": {}, "for": {}, "with": {}, "from": {}, "this": {}, "that": {},
+		"what": {}, "which": {}, "where": {}, "when": {}, "between": {}, "relation": {},
+		"any": {}, "are": {}, "is": {}, "to": {}, "of": {}, "in": {}, "on": {},
+	}
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		if len(p) < 2 {
+			continue
+		}
+		if _, ok := stop[p]; ok {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+func overlapScore(a, b []string) int {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	bset := map[string]struct{}{}
+	for _, token := range b {
+		bset[token] = struct{}{}
+	}
+	score := 0
+	for _, token := range a {
+		if _, ok := bset[token]; ok {
+			score++
+		}
+	}
+	return score
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (h *AIHandler) handleGeneral(question string) (string, string, error) {
@@ -645,8 +1152,9 @@ func (h *AIHandler) StreamQuery(c *gin.Context) {
 	sqlPrompt := []Message{
 		{
 			Role: "system",
-			Content: `You are a PostgreSQL expert. Output ONLY a single SQL SELECT query — no explanation, no markdown, no text before or after.
-Start with SELECT or WITH. Always use to_date='9999-01-01' for current records in dept_emp, titles, salaries tables.
+			Content: `You are a PostgreSQL expert. Output ONLY a single read-only SQL query — no explanation, no markdown, no text before or after.
+You may ONLY use SELECT, or WITH ... SELECT (read-only CTEs). One statement. No INSERT, UPDATE, DELETE, MERGE, COPY, TRUNCATE, DDL, or any write.
+No SELECT INTO, CREATE TABLE AS, or changes to data/schema. Start with SELECT or WITH. Always use to_date='9999-01-01' for current records in dept_emp, titles, salaries tables.
 ` + dbSchemaContext,
 		},
 		{Role: "user", Content: req.Question},
@@ -662,7 +1170,7 @@ Start with SELECT or WITH. Always use to_date='9999-01-01' for current records i
 	if generatedSQL == "" {
 		t1 := time.Now()
 		retryPrompt := []Message{
-			{Role: "system", Content: "Output ONLY a SQL SELECT query for PostgreSQL. No explanation. Start with SELECT."},
+			{Role: "system", Content: "Output ONLY a single read-only PostgreSQL SELECT (or WITH ... SELECT). No INSERT/UPDATE/DELETE/DDL. No explanation. Start with SELECT or WITH."},
 			{Role: "user", Content: req.Question + "\nSchema hint: " + dbSchemaContext},
 		}
 		raw2, _, _ := h.nvidia.ChatComplete(retryPrompt, false)
@@ -681,7 +1189,7 @@ Start with SELECT or WITH. Always use to_date='9999-01-01' for current records i
 		log.Printf("[AGENT] Tool (SQL exec) FAILED | %.2fs | %v", time.Since(t2).Seconds(), err)
 		tf := time.Now()
 		fixPrompt := []Message{
-			{Role: "system", Content: "Fix the PostgreSQL SQL. Output ONLY the corrected SQL."},
+			{Role: "system", Content: "Fix the PostgreSQL SQL error. Output ONLY a single read-only SELECT or WITH ... SELECT. No INSERT/UPDATE/DELETE/DDL. No explanation."},
 			{Role: "user", Content: fmt.Sprintf("Failed SQL:\n%s\n\nError: %v\n\nCorrected SQL:", generatedSQL, err)},
 		}
 		fixedRaw, _, _ := h.nvidia.ChatComplete(fixPrompt, false)
@@ -722,54 +1230,12 @@ Start with SELECT or WITH. Always use to_date='9999-01-01' for current records i
 
 	resultJSON, _ := json.Marshal(dbResults)
 
-	// ── Step 3: RAG — search all ready file chunks (if include_docs) ──────────
+	// ── Step 3: Hybrid retrieval over ready file chunks (if include_docs) ─────
 	var docContext string
 	if req.IncludeDocs {
 		t3 := time.Now()
-		var fileIDs []string
-		h.db.Raw(`SELECT id::text FROM uploaded_files WHERE status = 'ready'`).Scan(&fileIDs)
-
-		if len(fileIDs) > 0 {
-			var chunks []FileChunk
-
-			// Try FTS first
-			h.db.Model(&FileChunk{}).
-				Where("file_id::text IN ?", fileIDs).
-				Where("to_tsvector('english', content) @@ plainto_tsquery('english', ?)", req.Question).
-				Order("chunk_index").Limit(10).Find(&chunks)
-
-			// Fallback: keyword ILIKE search
-			if len(chunks) == 0 {
-				words := strings.Fields(req.Question)
-				if len(words) > 0 {
-					keyword := words[0]
-					if len(words) > 1 {
-						keyword = words[1]
-					}
-					h.db.Model(&FileChunk{}).
-						Where("file_id::text IN ?", fileIDs).
-						Where("content ILIKE ?", "%"+keyword+"%").
-						Order("chunk_index").Limit(10).Find(&chunks)
-				}
-			}
-
-			// Last fallback: newest chunks
-			if len(chunks) == 0 {
-				h.db.Model(&FileChunk{}).
-					Where("file_id::text IN ?", fileIDs).
-					Order("created_at DESC, chunk_index ASC").Limit(8).Find(&chunks)
-			}
-
-			var sb strings.Builder
-			for _, ch := range chunks {
-				sb.WriteString(ch.Content)
-				sb.WriteString("\n\n")
-			}
-			docContext = strings.TrimSpace(sb.String())
-			log.Printf("[AGENT] RAG search | %.2fs | chunks=%d", time.Since(t3).Seconds(), len(chunks))
-		} else {
-			log.Printf("[AGENT] RAG: no ready files found")
-		}
+		docContext = h.loadHybridDocumentContext(req.Question, req.FileIDs, 5)
+		log.Printf("[AGENT] Hybrid doc retrieval | %.2fs | chars=%d", time.Since(t3).Seconds(), len(docContext))
 	}
 
 	// ── Step 4: LLM Call 2 — Stream formatted markdown answer ─────────────────
@@ -896,19 +1362,82 @@ func cleanSQL(raw string) string {
 		}
 	}
 
-	// 4. Must start with SELECT or WITH
-	if !strings.HasPrefix(upper, "SELECT") && !strings.HasPrefix(upper, "WITH") {
+	// 4. Read-only validation (SELECT/WITH only; no DML/DDL; single statement)
+	if readOnlySQLViolations(raw) != "" {
 		return ""
 	}
 
-	// 5. Block any dangerous DML/DDL — read-only enforcement
-	for _, dangerous := range []string{"DROP ", "DELETE ", "UPDATE ", "INSERT ", "ALTER ", "TRUNCATE ", "GRANT ", "REVOKE ", "CREATE "} {
-		if strings.Contains(upper, dangerous) {
-			return ""
+	return raw
+}
+
+// readOnlySQLForbidden: uppercase substrings with leading/trailing space padding after normalization.
+// Used with a space-padded query string so we match whole-token commands, not identifiers.
+var readOnlySQLForbidden = []string{
+	" INSERT ",
+	" UPDATE ",
+	" DELETE ",
+	" MERGE ",
+	" TRUNCATE ",
+	" DROP ",
+	" ALTER ",
+	" CREATE ",
+	" REPLACE ",
+	" GRANT ",
+	" REVOKE ",
+	" COPY ", // COPY TO/FROM
+	" VACUUM",
+	" REINDEX",
+	" CALL ",
+	" EXECUTE ",
+	" DO ", // DO $$
+	" INTO ", // SELECT INTO (INSERT INTO is blocked by INSERT)
+}
+
+// readOnlySQLViolations returns a non-empty reason if s is not a single read-only SELECT/WITH.
+func readOnlySQLViolations(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "empty"
+	}
+	// Strip a single trailing semicolon (Postgres allows it)
+	if strings.HasSuffix(s, ";") {
+		s = strings.TrimSpace(s[:len(s)-1])
+	}
+	if s == "" {
+		return "empty"
+	}
+	parts := strings.Split(s, ";")
+	var chunks []string
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			chunks = append(chunks, t)
 		}
 	}
-
-	return raw
+	if len(chunks) > 1 {
+		return "multi"
+	}
+	if len(chunks) == 0 {
+		return "empty"
+	}
+	s = chunks[0]
+	trimmed := strings.TrimSpace(s)
+	upper0 := strings.ToUpper(trimmed)
+	// Reject copy/export commands that are not SELECT-shaped
+	if strings.HasPrefix(upper0, "COPY") {
+		return "copy"
+	}
+	if !strings.HasPrefix(upper0, "SELECT") && !strings.HasPrefix(upper0, "WITH") {
+		return "prefix"
+	}
+	norm := " " + strings.ToUpper(s) + " "
+	norm = strings.ReplaceAll(norm, "\n", " ")
+	norm = strings.ReplaceAll(norm, "\t", " ")
+	for _, d := range readOnlySQLForbidden {
+		if strings.Contains(norm, d) {
+			return "forbidden"
+		}
+	}
+	return ""
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -943,11 +1472,34 @@ func main() {
 		log.Printf("Warning: could not open raw DB connection: %v", err)
 	}
 
-	h := &AIHandler{
-		db:     db,
-		nvidia: newNvidiaClient(cfg),
-		sqlDB:  directDB,
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL, Password: cfg.RedisAuth})
+	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		log.Printf("Redis connection warning: %v (AI job status will be unavailable until Redis is reachable)", err)
 	}
+
+	aiWriter := &kafka.Writer{
+		Addr:         kafka.TCP(cfg.KafkaBrokers...),
+		Topic:        cfg.AIRequestsTopic,
+		Balancer:     &kafka.LeastBytes{},
+		RequiredAcks: kafka.RequireOne,
+	}
+	notificationWriter := &kafka.Writer{
+		Addr:         kafka.TCP(cfg.KafkaBrokers...),
+		Topic:        cfg.NotificationsTopic,
+		Balancer:     &kafka.LeastBytes{},
+		RequiredAcks: kafka.RequireOne,
+	}
+
+	h := &AIHandler{
+		db:                 db,
+		nvidia:             newNvidiaClient(cfg),
+		sqlDB:              directDB,
+		rdb:                rdb,
+		cfg:                cfg,
+		aiWriter:           aiWriter,
+		notificationWriter: notificationWriter,
+	}
+	h.startAIWorker(context.Background())
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -966,6 +1518,8 @@ func main() {
 	api := r.Group("/api/ai")
 	{
 		api.POST("/query", h.Query)
+		api.POST("/jobs", h.QueueQuery)
+		api.GET("/jobs/:id", h.GetJob)
 		api.POST("/stream", h.StreamQuery)
 		api.GET("/history", h.History)
 		api.GET("/schema", h.Schema)

@@ -4,7 +4,7 @@
 | ----------------------------------------- | --------------------------------------------------------------- |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md)    | System & sequence diagrams, microservice catalog, data model.   |
 | [`FUNCTIONALITY.md`](./FUNCTIONALITY.md)  | User journeys, page-by-page features, API contracts.            |
-| [`DEPLOYMENT.md`](./DEPLOYMENT.md)        | Step-by-step Docker / GKE / Terraform / Jenkins setup.          |
+| [`DEPLOYMENT.md`](./DEPLOYMENT.md)        | Step-by-step Docker / Cloud Run / Terraform / Jenkins setup.    |
 | [`../INFRASTRUCTURE.md`](../INFRASTRUCTURE.md) | Every GCP service we provision and why (single source of truth). |
 | [`SECURITY.md`](./SECURITY.md)            | Layered defenses: identity, edge, gateway, workload, data.      |
 | [`CICD.md`](./CICD.md)                    | Cloud Jenkins pipeline, GitHub webhooks, Okta SSO wiring.       |

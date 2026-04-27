@@ -47,7 +47,7 @@ resource "google_pubsub_subscription" "ai_events_to_bq" {
   bigquery_config {
     table            = "${data.google_project.current.project_id}.${google_bigquery_dataset.portal_analytics.dataset_id}.${google_bigquery_table.events.table_id}"
     use_table_schema = true
-    write_metadata   = true
+    write_metadata   = false
   }
 
   ack_deadline_seconds = 60

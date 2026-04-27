@@ -46,6 +46,7 @@ resource "google_kms_crypto_key_iam_member" "gcs_kms_use" {
 data "google_project" "current" {}
 
 resource "google_kms_crypto_key_iam_member" "sql_kms_use" {
+  count         = 0 # Enable once Cloud SQL service identity is verified in this project
   crypto_key_id = google_kms_crypto_key.portal_data_key.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloud-sql.iam.gserviceaccount.com"

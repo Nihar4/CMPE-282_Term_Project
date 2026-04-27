@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -20,22 +24,36 @@ import (
 // ── Config ────────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Port       string
-	DBHost     string
-	DBPort     string
-	DBName     string
-	DBUser     string
-	DBPassword string
+	Port               string
+	DBHost             string
+	DBPort             string
+	DBName             string
+	DBUser             string
+	DBPassword         string
+	RedisURL           string
+	RedisAuth          string
+	KafkaBrokers       []string
+	NotificationsTopic string
+	NotificationGroup  string
 }
 
 func loadConfig() Config {
+	brokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
+	for i := range brokers {
+		brokers[i] = strings.TrimSpace(brokers[i])
+	}
 	return Config{
-		Port:       getEnv("PORT", "8082"),
-		DBHost:     getEnv("DB_HOST", "localhost"),
-		DBPort:     getEnv("DB_PORT", "5432"),
-		DBName:     getEnv("DB_NAME", "enterprise_portal"),
-		DBUser:     getEnv("DB_USER", "portal_user"),
-		DBPassword: getEnv("DB_PASSWORD", "portal_password"),
+		Port:               getEnv("PORT", "8082"),
+		DBHost:             getEnv("DB_HOST", "localhost"),
+		DBPort:             getEnv("DB_PORT", "5432"),
+		DBName:             getEnv("DB_NAME", "enterprise_portal"),
+		DBUser:             getEnv("DB_USER", "portal_user"),
+		DBPassword:         getEnv("DB_PASSWORD", "portal_password"),
+		RedisURL:           getEnv("REDIS_URL", "localhost:6379"),
+		RedisAuth:          getEnv("REDIS_AUTH", ""),
+		KafkaBrokers:       brokers,
+		NotificationsTopic: getEnv("NOTIFICATIONS_TOPIC", "portal.notifications"),
+		NotificationGroup:  getEnv("NOTIFICATION_CONSUMER_GROUP", "portal-notification-service"),
 	}
 }
 
@@ -138,11 +156,13 @@ type Pagination struct {
 // ── Handlers ──────────────────────────────────────────────────────────────
 
 type DataHandler struct {
-	db *gorm.DB
+	db  *gorm.DB
+	rdb *redis.Client
+	cfg Config
 }
 
-func NewDataHandler(db *gorm.DB) *DataHandler {
-	return &DataHandler{db: db}
+func NewDataHandler(db *gorm.DB, rdb *redis.Client, cfg Config) *DataHandler {
+	return &DataHandler{db: db, rdb: rdb, cfg: cfg}
 }
 
 // GET /health
@@ -402,9 +422,82 @@ type Notification struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+func (h *DataHandler) startNotificationConsumer(ctx context.Context) {
+	if h.rdb == nil || len(h.cfg.KafkaBrokers) == 0 {
+		return
+	}
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  h.cfg.KafkaBrokers,
+		Topic:    h.cfg.NotificationsTopic,
+		GroupID:  h.cfg.NotificationGroup,
+		MinBytes: 1,
+		MaxBytes: 1e6,
+		MaxWait:  1 * time.Second,
+	})
+
+	go func() {
+		defer reader.Close()
+		log.Printf("[DATA] Kafka notification consumer topic=%s group=%s brokers=%s",
+			h.cfg.NotificationsTopic, h.cfg.NotificationGroup, strings.Join(h.cfg.KafkaBrokers, ","))
+		for {
+			msg, err := reader.FetchMessage(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[DATA] Kafka notification fetch failed: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			var n Notification
+			if err := json.Unmarshal(msg.Value, &n); err != nil {
+				log.Printf("[DATA] invalid notification payload: %v", err)
+				_ = reader.CommitMessages(ctx, msg)
+				continue
+			}
+			if n.ID == "" {
+				n.ID = "kafka-" + string(msg.Key)
+			}
+			if n.CreatedAt.IsZero() {
+				n.CreatedAt = time.Now().UTC()
+			}
+
+			payload, _ := json.Marshal(n)
+			pipe := h.rdb.Pipeline()
+			pipe.LPush(ctx, "notifications", payload)
+			pipe.LTrim(ctx, "notifications", 0, 49)
+			if _, err := pipe.Exec(ctx); err != nil {
+				log.Printf("[DATA] Redis notification cache failed: %v", err)
+			}
+			if err := reader.CommitMessages(ctx, msg); err != nil {
+				log.Printf("[DATA] Kafka notification commit failed: %v", err)
+			}
+		}
+	}()
+}
+
+func (h *DataHandler) cachedNotifications(ctx context.Context) []Notification {
+	if h.rdb == nil {
+		return nil
+	}
+	raw, err := h.rdb.LRange(ctx, "notifications", 0, 19).Result()
+	if err != nil {
+		return nil
+	}
+	notifs := make([]Notification, 0, len(raw))
+	for _, item := range raw {
+		var n Notification
+		if err := json.Unmarshal([]byte(item), &n); err == nil {
+			notifs = append(notifs, n)
+		}
+	}
+	return notifs
+}
+
 // GET /api/data/notifications
 func (h *DataHandler) GetNotifications(c *gin.Context) {
-	var notifs []Notification
+	notifs := h.cachedNotifications(c.Request.Context())
 
 	// ── 1. File upload events ────────────────────────────────────────────────
 	type FileRow struct {
@@ -527,7 +620,14 @@ func main() {
 	sqlDB.SetMaxOpenConns(50)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	h := NewDataHandler(db)
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL, Password: cfg.RedisAuth})
+	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		log.Printf("Redis connection warning: %v (Kafka notifications will still be consumed when Redis is reachable)", err)
+	}
+
+	h := NewDataHandler(db, rdb, cfg)
+	h.startNotificationConsumer(context.Background())
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())

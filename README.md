@@ -2,10 +2,10 @@
 
 > A modern, fully cloud-native Proof-of-Concept that migrates an enterprise database to the cloud
 > and exposes it through an SSO-protected web portal with AI-powered querying, document
-> intelligence, real-time analytics, and end-to-end CI/CD on **GCP + Kubernetes + Docker + Jenkins**.
+> intelligence, real-time analytics, and end-to-end CI/CD on **GCP Cloud Run + Docker + Jenkins**.
 
 [![GCP](https://img.shields.io/badge/Cloud-GCP-4285F4?logo=googlecloud&logoColor=white)](https://cloud.google.com)
-[![Kubernetes](https://img.shields.io/badge/Orchestrator-Kubernetes-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![Cloud Run](https://img.shields.io/badge/Runtime-Cloud%20Run-4285F4?logo=googlecloud&logoColor=white)](https://cloud.google.com/run)
 [![Docker](https://img.shields.io/badge/Container-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
 [![Jenkins](https://img.shields.io/badge/CI%2FCD-Jenkins-D24939?logo=jenkins&logoColor=white)](https://www.jenkins.io)
 [![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?logo=terraform&logoColor=white)](https://www.terraform.io)
@@ -13,7 +13,7 @@
 [![Go](https://img.shields.io/badge/Backend-Go-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![FastAPI](https://img.shields.io/badge/Parser-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
-[![Auth0](https://img.shields.io/badge/SSO-Auth0%20%2F%20Okta-EB5424?logo=auth0&logoColor=white)](https://auth0.com)
+[![Okta](https://img.shields.io/badge/SSO-Okta-00297A?logo=okta&logoColor=white)](https://www.okta.com)
 
 ---
 
@@ -23,7 +23,7 @@ Your team works for a company that wants to explore moving their business to the
 manager has provided a backup of the company's enterprise database and asks for a
 **Proof-of-Concept cloud-based IT infrastructure** that includes:
 
-- Okta / Auth0 cloud Single Sign-On (SSO) and AD federation
+- Okta cloud Single Sign-On (SSO) and AD federation
 - Cloud-based database / datastore backend
 - Cloud-based web portal for viewing/browsing sample enterprise data (with SSO login)
 - GitHub integrated into SSO for all project code
@@ -45,7 +45,7 @@ A live demo URL, screenshots, and the full project report are referenced in
 
 ```
                        ┌──────────────────────────────────────────────┐
-                       │              Okta / Auth0 IdP                │
+                       │                 Okta IdP                     │
                        │   (SSO, AD federation, MFA, GitHub Apps)     │
                        └───────────────┬──────────────────────────────┘
                                        │ OIDC
@@ -78,8 +78,15 @@ A live demo URL, screenshots, and the full project report are referenced in
        │           │  (Kimi K2) │    │   Python   │
        │           └────────────┘    └────────────┘
 
-   GitHub  ──▶  Jenkins (GKE)  ──▶  Build · Test · Trivy · GCR Push  ──▶  GKE Rollout
+   GitHub  ──▶  Jenkins  ──▶  Cloud Build  ──▶  Artifact Registry  ──▶  Cloud Run
 ```
+
+### Current Serverless Flow
+
+- The portal now targets **Cloud Run for every application service**: frontend, API gateway, auth, data, file, AI, analytics, and parser.
+- AI chat requests are submitted to Kafka topic `portal.ai.requests`; Cloud Run `ai-service` instances consume as the `portal-ai-workers` consumer group, which load-balances jobs across replicas.
+- Redis stores AI job state/results under `ai_job:<job_id>`, so the React chat can enqueue once and poll until complete.
+- Kafka topic `portal.notifications` carries file and AI events; `data-service` consumes those events and caches the latest notifications in Redis for the UI bell.
 
 A more detailed view (sequence diagrams, flows, and IAM boundaries) lives in
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
@@ -90,15 +97,15 @@ A more detailed view (sequence diagrams, flows, and IAM boundaries) lives in
 
 | Requirement                                              | Implementation                                                                                                  |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Okta-based Cloud SSO / AD                                | Auth0 / Okta OIDC tenants. Frontend uses Auth0 SDK; gateway/auth-service validate ID-token + issue JWT.         |
+| Okta-based Cloud SSO / AD                                | Okta OIDC tenant. Frontend redirects through Okta; auth-service exchanges the code and issues a portal JWT.     |
 | Cloud database / datastore                               | Cloud SQL for PostgreSQL 15 (regional HA), Cloud Memorystore Redis 7, Cloud Storage for files.                  |
-| Cloud Web Portal w/ SSO                                  | React 18 + MUI portal served by Nginx pod behind GKE Ingress, all routes guarded by SSO login.                  |
+| Cloud Web Portal w/ SSO                                  | React 18 + MUI portal served by Cloud Run frontend, all routes guarded by Okta SSO login.                       |
 | GitHub integrated into SSO                               | GitHub org enrolled in the Okta tenant (OIDC + SCIM). Same identity used for repo, Jenkins, GCP IAM.            |
-| Cloud Jenkins, integrated into SSO + GitHub              | Jenkins controller deployed on GKE, Okta plugin for login, GitHub webhooks for build triggers.                  |
-| Continuous Deployment                                    | `Jenkinsfile` builds & tests Go microservices, scans images with Trivy, pushes to GCR, rolls out on GKE.        |
-| Layered security                                         | Identity (SSO/JWT), network (private VPC, internal LB), workload (Workload Identity, Secret Manager), runtime. |
+| Cloud Jenkins, integrated into SSO + GitHub              | Jenkins controller on GCE, Okta SAML for login, GitHub webhooks for build triggers.                             |
+| Continuous Deployment                                    | Jenkins triggers `cloudbuild-serverless.yaml`, which builds, pushes, and deploys Cloud Run.                     |
+| Layered security                                         | Identity (SSO/JWT), network (private VPC/internal Cloud Run), Cloud Run service account, Secret Manager.        |
 | Document repository                                      | File upload (PDF/DOCX/CSV/TXT), Python parser-service, vector-style chunking, AI Q&A on documents.              |
-| Modern / serverless approach                             | Cloud SQL, Memorystore, GCS, Artifact Registry, GKE Autopilot-ready, HPA, Workload Identity, managed Prometheus.|
+| Modern / serverless approach                             | Cloud Run, Cloud SQL, Memorystore, GCS, Artifact Registry, serverless VPC access, Secret Manager, Cloud Build. |
 
 ---
 
@@ -108,16 +115,16 @@ A more detailed view (sequence diagrams, flows, and IAM boundaries) lives in
 | ------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Frontend                  | React 18, TypeScript, Material UI, Axios, React Router, react-dropzone                                        |
 | API Gateway               | Go 1.21, Gin, JWT-Go, Gin-CORS, custom rate limiter, reverse-proxy with `httputil`                            |
-| Microservices (Go)        | Gin, GORM (PostgreSQL), JWT, Auth0/Okta OIDC, segmentio/kafka-go                                              |
+| Microservices (Go)        | Gin, GORM (PostgreSQL), JWT, Okta OIDC, segmentio/kafka-go                                                    |
 | Parser microservice       | Python 3.11, FastAPI, Uvicorn, pypdf, python-docx, csv, lxml fallback                                         |
-| AI                        | NVIDIA NIM (`moonshotai/kimi-k2-thinking`), NL→SQL prompt engineering, document Q&A with retrieval            |
+| AI                        | NVIDIA NIM (`openai/gpt-oss-120b`), NL→SQL prompt engineering, document Q&A with retrieval            |
 | Datastore                 | PostgreSQL 15 (Cloud SQL), Redis 7 (Memorystore), GCS for file blobs, Kafka for events                        |
-| IaC                       | Terraform 1.5+ (Google + Google-beta providers), GKE / Cloud SQL / GCS / Redis / Artifact Registry            |
-| Container orchestration   | Kubernetes (GKE Regional cluster, Workload Identity, HPA, Managed Prometheus)                                 |
-| Build / CI                | Docker multi-stage builds, GitHub Actions (optional), Jenkins on GKE                                          |
-| CD                        | Jenkinsfile pipeline → GCR → `kubectl set image` → `rollout status`                                            |
-| Identity                  | Okta (primary) and/or Auth0 (federation), GitHub SAML/OIDC, GCP IAM, Workload Identity                        |
-| Observability             | GCP Cloud Logging, GKE Managed Prometheus, Liveness/Readiness probes, Trivy image scans                        |
+| IaC                       | Terraform 1.5+ (Google + Google-beta providers), Cloud Run / Cloud SQL / GCS / Redis / Artifact Registry      |
+| Runtime                   | Cloud Run for all application containers                                                                      |
+| Build / CI                | Docker multi-stage builds, Jenkins on GCE, Cloud Build                                                        |
+| CD                        | Jenkinsfile or `cloudbuild-serverless.yaml` → Artifact Registry → Cloud Run revisions                         |
+| Identity                  | Okta, GitHub SAML/OIDC, GCP IAM, Cloud Run service accounts                                                   |
+| Observability             | GCP Cloud Logging, Cloud Monitoring, Cloud Run metrics, Trivy image scans                                      |
 
 ---
 
@@ -133,26 +140,26 @@ CMPE-282_Term_Project/
 ├── docs/
 │   ├── ARCHITECTURE.md          ← system + sequence diagrams
 │   ├── FUNCTIONALITY.md         ← feature matrix, screenshots, user journeys
-│   ├── DEPLOYMENT.md            ← step-by-step GCP / K8s / Docker / Jenkins setup
+│   ├── DEPLOYMENT.md            ← step-by-step GCP / Cloud Run / Docker / Jenkins setup
 │   ├── SECURITY.md              ← Okta, JWT, IAM, encryption, layered defenses
+│   ├── OKTA_SETUP.md            ← Portal OIDC + Jenkins SAML setup values
 │   ├── CICD.md                  ← Jenkins + GitHub pipeline deep dive
 │   ├── PROJECT_REPORT.md        ← academic-style write-up (intro→results→learnings)
 │   └── PRESENTATION.md          ← slide-deck script
 ├── frontend/                    ← React + MUI portal
 ├── backend/
 │   ├── api-gateway/             ← Go/Gin gateway: CORS, JWT, rate limit, proxy
-│   ├── auth-service/            ← Auth0/Okta exchange, user mgmt, JWT mint
+│   ├── auth-service/            ← Okta exchange, user mgmt, JWT mint
 │   ├── data-service/            ← Browse enterprise tables (employees, sales, …)
 │   ├── file-service/            ← Uploads, GCS, parsing orchestration, chunks
 │   ├── parser-service/          ← Python FastAPI parser (pdf/docx/csv/txt)
-│   ├── ai-service/              ← NL→SQL & document Q&A via NVIDIA Kimi K2
+│   ├── ai-service/              ← NL→SQL & document Q&A via NVIDIA NIM
 │   └── analytics-service/       ← KPI dashboards & report generation
 ├── database/
 │   ├── migrations/              ← 001_init.sql, 002_testdb.sql
 │   └── seeds/                   ← mock_data.sql, 002_testdb_sample.sql
 └── infrastructure/
-    ├── k8s/                     ← K8s manifests (namespace, configmap, services, ingress)
-    └── terraform/               ← GCP IaC (GKE, Cloud SQL, GCS, Memorystore, Artifact Reg.)
+    └── terraform/               ← GCP IaC (Cloud Run, Cloud SQL, GCS, Memorystore, Artifact Reg.)
 ```
 
 ---
@@ -183,15 +190,13 @@ Helpful commands: `make logs`, `make ps`, `make down`, `make clean`, `make test`
 
 ---
 
-## 7. Quick Start (Cloud — GCP + GKE + Jenkins)
+## 7. Quick Start (Cloud — GCP Cloud Run + Jenkins)
 
-1. **Provision** GCP infra with Terraform — `make infra-up` (creates VPC, GKE, Cloud SQL,
-   GCS, Memorystore, Artifact Registry).
-2. **Build & push** images — `make docker-push` or trigger the Jenkins pipeline.
-3. **Deploy** — `make k8s-deploy` (applies namespace, configmap, deployments, services,
-   HPAs, ingress).
-4. **Connect SSO** — set Okta/Auth0 client IDs in the K8s `ConfigMap` and `Secret`
-   resources, then `kubectl rollout restart`.
+1. **Provision** GCP infra with Terraform — `make infra-up` (creates VPC, Cloud SQL,
+   GCS, Memorystore, Artifact Registry, Jenkins VM, and Cloud Run services).
+2. **Deploy** — trigger Jenkins or run `make cloud-run-deploy`.
+3. **Connect SSO** — add the Cloud Run frontend callback/logout URLs to Okta, then
+   update Jenkins env/substitutions and rerun the pipeline.
 
 The exact step-by-step is documented in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
 
@@ -202,7 +207,7 @@ The exact step-by-step is documented in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT
 | Service             | Port | Lang   | Responsibility                                                            |
 | ------------------- | ---- | ------ | ------------------------------------------------------------------------- |
 | `api-gateway`       | 8080 | Go     | Single ingress for the SPA, CORS/JWT/rate-limit, reverse-proxy            |
-| `auth-service`      | 8081 | Go     | Auth0/Okta token exchange, profile sync, JWT issuance                     |
+| `auth-service`      | 8081 | Go     | Okta token exchange, profile sync, JWT issuance                           |
 | `data-service`      | 8082 | Go     | Read-only enterprise data API (employees, products, sales, inventory)    |
 | `file-service`      | 8083 | Go     | Upload, persist to GCS, orchestrate parsing, expose chunks                |
 | `parser-service`    | 8090 | Python | Robust extraction for PDF / DOCX / CSV / TXT, returns ordered chunks     |
@@ -217,11 +222,11 @@ The exact step-by-step is documented in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT
 2. **Edge**: GCP HTTPS Load Balancer + Cloud Armor (rate limit, geo block).
 3. **Gateway**: CORS allow-list, JWT verification, per-IP rate limiter, response header
    stripping (no upstream CORS leakage).
-4. **Workload**: Each microservice runs as a non-root container, with Workload Identity
-   binding K8s SA → GCP SA (no JSON keys in pods).
+4. **Workload**: Each microservice runs as a non-root Cloud Run container with a
+   least-privilege Cloud Run service account.
 5. **Data**: Cloud SQL private IP, TLS at rest + in transit, Secret Manager for DB pwd /
    JWT secret / NVIDIA key. Redis with auth + TLS.
-6. **Supply chain**: Trivy image scan in Jenkins, GCR vulnerability scanning, signed
+6. **Supply chain**: Trivy image scan in Jenkins/Cloud Build, Artifact Registry scanning, signed
    commits required on `main`.
 
 Full details in [`docs/SECURITY.md`](./docs/SECURITY.md).
@@ -231,22 +236,14 @@ Full details in [`docs/SECURITY.md`](./docs/SECURITY.md).
 ## 10. CI/CD Pipeline
 
 Trigger: every push or PR to `main` fires a GitHub webhook → Jenkins. The pipeline
-([`Jenkinsfile`](./Jenkinsfile)) executes 12 stages:
+([`Jenkinsfile`](./Jenkinsfile)) runs:
 
 1. Checkout
 2. GCP auth (service account → `gcloud auth`)
-3. Terraform apply (optional, gated by parameter)
-4. Backend tests (parallel `go test ./...`)
-5. Build Docker images (parallel)
-6. Trivy security scan
-7. Push to GCR / Artifact Registry
-8. Get GKE credentials
-9. DB migrations (optional)
-10. Deploy to GKE (`kubectl set image` then `apply -f`)
-11. `kubectl rollout status` per deployment
-12. Health check (count Running pods)
-
-On failure, the `post` block automatically `kubectl rollout undo`s every deployment.
+3. Backend tests (parallel `go test ./...`)
+4. `gcloud builds submit --config cloudbuild-serverless.yaml`
+5. Cloud Build builds images, pushes Artifact Registry, and runs Terraform apply
+6. Terraform deploys/updates Cloud Run revisions
 
 See [`docs/CICD.md`](./docs/CICD.md) for the full pipeline anatomy plus the GitHub +
 Okta + Jenkins SSO wiring.
@@ -255,7 +252,7 @@ Okta + Jenkins SSO wiring.
 
 ## 11. Functionality (User-Facing)
 
-- **SSO Login** via Okta / Auth0; JIT user provisioning into PostgreSQL `users` table.
+- **SSO Login** via Okta; JIT user provisioning into PostgreSQL `users` table.
 - **Dashboard** — KPIs sourced from `analytics-service` (sales, headcount, inventory).
 - **Data Browser** — paginated, filterable views over `enterprise_*` tables.
 - **AI Chat** — NL→SQL ("show me top 5 reps in Q2"), grounded document Q&A
@@ -274,9 +271,10 @@ See [`docs/FUNCTIONALITY.md`](./docs/FUNCTIONALITY.md) for screenshots and featu
 | ------------------------------------------ | ------------------------------------------------------- |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Architects, reviewers — system + sequence diagrams      |
 | [`docs/FUNCTIONALITY.md`](./docs/FUNCTIONALITY.md) | Stakeholders — features, screenshots, journeys         |
-| [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)     | DevOps — GCP / GKE / Docker / Jenkins step-by-step      |
+| [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)     | DevOps — GCP / Cloud Run / Docker / Jenkins step-by-step |
 | [`INFRASTRUCTURE.md`](./INFRASTRUCTURE.md)         | DevOps — every GCP service used and why (single source of truth) |
 | [`docs/SECURITY.md`](./docs/SECURITY.md)         | Security reviewers — Okta, layered defenses             |
+| [`docs/OKTA_SETUP.md`](./docs/OKTA_SETUP.md)     | DevOps — portal Okta OIDC and Jenkins SAML setup        |
 | [`docs/CICD.md`](./docs/CICD.md)                 | DevOps — Jenkins pipeline + GitHub + Okta SSO           |
 | [`docs/PROJECT_REPORT.md`](./docs/PROJECT_REPORT.md) | Faculty — academic project report                       |
 | [`docs/PRESENTATION.md`](./docs/PRESENTATION.md) | Presenters — slide-by-slide outline                     |
@@ -293,7 +291,7 @@ See [`docs/FUNCTIONALITY.md`](./docs/FUNCTIONALITY.md) for screenshots and featu
 | ------------------------------- | ----------------------------------------------------------- |
 | Aditya Govind Shahari           | Frontend & UX, AI integration                               |
 | Mohsen Minai                    | Backend (Go), security, CORS / JWT / IAM                    |
-| Nihar Dharmeshkumar Patel       | Cloud architecture, GCP / Terraform / Kubernetes, CI/CD    |
+| Nihar Dharmeshkumar Patel       | Cloud architecture, GCP / Terraform / Cloud Run, CI/CD     |
 | Tamizh Selvan Manivannan        | Data engineering, parser-service (Python), analytics        |
 
 See [`TEAM.md`](./TEAM.md) for contribution breakdown.

@@ -4,14 +4,11 @@
 project_id      = "your-gcp-project-id"
 region          = "us-central1"
 zone            = "us-central1-a"
-cluster_name    = "enterprise-portal-cluster"
-machine_type    = "e2-standard-4"
-node_count      = 2
-min_node_count  = 2
-max_node_count  = 100
 db_tier         = "db-g1-small"
 db_name         = "enterprise_portal"
 db_user         = "portal_user"
 db_password     = "CHANGE_THIS_STRONG_PASSWORD"
 gcs_bucket_name = "enterprise-portal-files"
 environment     = "production"
+deploy_serverless = true
+kafka_brokers     = "REPLACE_WITH_MANAGED_KAFKA_BOOTSTRAP:9092"

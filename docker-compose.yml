@@ -108,13 +108,13 @@ services:
       DB_PASSWORD: portal_password
       REDIS_URL: redis:6379
       JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
-      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-dev-xbnsordr5elttyug.us.auth0.com}
-      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-x8pFzWFtyYCBXrr6U2NkxABroQqqMvxM}
-      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-replace-via-env-or-secret-manager}
-      OKTA_DOMAIN: ${OKTA_DOMAIN:-dev-example.okta.com}
-      OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-your-okta-client-id}
+      OKTA_DOMAIN: ${OKTA_DOMAIN:-trial-5413467.okta.com}
+      OKTA_ISSUER: ${OKTA_ISSUER:-https://trial-5413467.okta.com/oauth2/default}
+      OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-0oa12cfmwjeBVrl0I698}
       OKTA_CLIENT_SECRET: ${OKTA_CLIENT_SECRET:-your-okta-client-secret}
-      OKTA_REDIRECT_URI: ${OKTA_REDIRECT_URI:-http://localhost:8080/api/auth/callback}
+      OKTA_REDIRECT_URI: ${OKTA_REDIRECT_URI:-http://localhost:3000/authorization-code/callback}
+      OKTA_LOGOUT_REDIRECT_URI: ${OKTA_LOGOUT_REDIRECT_URI:-http://localhost:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       DEV_MODE: ${DEV_MODE:-true}
     depends_on:
       postgres:
@@ -140,9 +140,17 @@ services:
       DB_USER: portal_user
       DB_PASSWORD: portal_password
       JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+      REDIS_URL: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      NOTIFICATIONS_TOPIC: portal.notifications
+      NOTIFICATION_CONSUMER_GROUP: portal-notification-service
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
     networks:
       - portal_network
     restart: unless-stopped
@@ -177,6 +185,7 @@ services:
       GCP_PROJECT_ID: ${GCP_PROJECT_ID:-your-gcp-project}
       UPLOAD_DIR: /app/uploads
       KAFKA_BROKERS: kafka:9092
+      NOTIFICATIONS_TOPIC: portal.notifications
       USE_LOCAL_STORAGE: "true"
       PARSER_SERVICE_URL: http://parser-service:8090
     volumes:
@@ -209,10 +218,51 @@ services:
       JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-replace-via-env-or-secret-manager}
       NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
-      NVIDIA_MODEL: moonshotai/kimi-k2-instruct
+      NVIDIA_MODEL: openai/gpt-oss-120b
+      REDIS_URL: redis:6379
       KAFKA_BROKERS: kafka:9092
+      AI_REQUESTS_TOPIC: portal.ai.requests
+      NOTIFICATIONS_TOPIC: portal.notifications
+      AI_CONSUMER_GROUP: portal-ai-workers
+      AI_WORKER_ENABLED: "true"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - portal_network
+    restart: unless-stopped
+
+  # Additional queue workers can be scaled with:
+  # docker compose up --scale ai-worker=3
+  ai-worker:
+    build:
+      context: ./backend/ai-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8084"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: enterprise_portal
+      DB_USER: portal_user
+      DB_PASSWORD: portal_password
+      JWT_SECRET: ${JWT_SECRET:-enterprise-portal-super-secret-jwt-key-2024}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-replace-via-env-or-secret-manager}
+      NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
+      NVIDIA_MODEL: openai/gpt-oss-120b
+      REDIS_URL: redis:6379
+      KAFKA_BROKERS: kafka:9092
+      AI_REQUESTS_TOPIC: portal.ai.requests
+      NOTIFICATIONS_TOPIC: portal.notifications
+      AI_CONSUMER_GROUP: portal-ai-workers
+      AI_WORKER_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       kafka:
         condition: service_started
@@ -248,9 +298,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: http://localhost:8080
+        REACT_APP_OKTA_ISSUER: ${OKTA_ISSUER:-https://trial-5413467.okta.com/oauth2/default}
+        REACT_APP_OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-0oa12cfmwjeBVrl0I698}
+        REACT_APP_OKTA_REDIRECT_URI: ${OKTA_REDIRECT_URI:-http://localhost:3000/authorization-code/callback}
+        REACT_APP_OKTA_LOGOUT_REDIRECT_URI: ${OKTA_LOGOUT_REDIRECT_URI:-http://localhost:3000}
     container_name: portal-frontend
     ports:
-      - "3000:80"
+      - "3000:8080"
     environment:
       REACT_APP_API_URL: http://localhost:8080
     depends_on:

@@ -13,7 +13,7 @@ Portal, the underlying API contracts, and the data they touch.
 | **Analyst**        | Ad-hoc SQL via natural language, build custom analytics reports.               |
 | **Admin / IT**     | Manage users (via Okta), monitor system health, configure data sources.       |
 
-All three log in with the same Okta / Auth0 SSO; **role** (`user`, `analyst`,
+All three log in with the same Okta SSO; **role** (`user`, `analyst`,
 `admin`) is sourced from the IdP claim and stored in `users.role`.
 
 ---
@@ -22,7 +22,7 @@ All three log in with the same Okta / Auth0 SSO; **role** (`user`, `analyst`,
 
 | Route          | Component         | Purpose                                                |
 | -------------- | ----------------- | ------------------------------------------------------ |
-| `/login`       | `Login.tsx`       | Auth0 / Okta universal login redirect, dev-login fallback. |
+| `/login`       | `Login.tsx`       | Okta universal login redirect, dev-login fallback. |
 | `/`            | `Dashboard.tsx`   | Top-line KPIs, recent uploads, "Ask AI" quick prompt.  |
 | `/data`        | `DataBrowser.tsx` | Paginated, sortable, filterable enterprise tables.    |
 | `/files`       | `FileUpload.tsx`  | Drag-and-drop upload, list, delete, chunk preview.    |
@@ -39,9 +39,9 @@ no JWT is in `localStorage`.
 ### 3.1 What the user sees
 
 1. Visits `https://portal.example.com`.
-2. Redirected to Okta / Auth0 hosted login.
+2. Redirected to Okta hosted login.
 3. (Optional) AD/social/MFA challenge depending on tenant policy.
-4. Auth0 redirects back to `/callback` with an `id_token`.
+4. Okta redirects back to `/authorization-code/callback` with an authorization code.
 5. Frontend exchanges it at `POST /api/auth/exchange` for an internal JWT.
 6. JWT stored in memory + `localStorage`, refreshed silently every 15 min.
 
@@ -56,7 +56,7 @@ no JWT is in `localStorage`.
 ### 3.3 Dev mode
 
 When `DEV_MODE=true`, `POST /api/auth/dev-login` returns a JWT for a synthetic
-admin user. This is **disabled in production** by the Helm/K8s config map.
+admin user. This is **disabled in production** by Cloud Run environment configuration.
 
 ---
 
@@ -226,7 +226,7 @@ Response includes `rows`, recommended `chart_type`, and a saveable `report_id`.
 
 ### 10.1 New employee onboarding
 
-1. IT adds the user in Okta → Okta SCIM-syncs into Auth0/portal.
+1. IT adds the user in Okta.
 2. User logs in for the first time → JIT row in `users`.
 3. Dashboard shows Welcome card, links to Data Browser and AI Chat.
 

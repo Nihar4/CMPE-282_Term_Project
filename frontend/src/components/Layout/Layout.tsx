@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { useAuth0 } from '@auth0/auth0-react';
+import { useAuth } from '../../contexts/AuthContext';
 import {
   Box, Drawer, AppBar, Toolbar, Typography, List, ListItem,
   ListItemButton, ListItemIcon, ListItemText, Avatar, Menu, MenuItem,
   Divider, IconButton, Tooltip, Badge, Chip, Popover, Paper,
-  useMediaQuery, useTheme, CircularProgress,
+  useMediaQuery, useTheme,
 } from '@mui/material';
 import {
   Dashboard as DashboardIcon,
@@ -25,7 +25,7 @@ import {
   DoneAll as DoneAllIcon,
   HourglassEmpty as ProcessingIcon,
 } from '@mui/icons-material';
-import { setAuthToken, auth0Exchange, devLogin, getSavedAuthToken, notificationsApi } from '../../services/api';
+import { notificationsApi } from '../../services/api';
 
 const DRAWER_WIDTH = 240;
 const READ_KEY = 'portal_notif_read_ids';
@@ -98,61 +98,20 @@ function NotifIcon2({ icon, type }: { icon: string; type: string }) {
 // ── Main Layout ──────────────────────────────────────────────────────────────
 
 export default function Layout() {
-  const { user, logout, getAccessTokenSilently } = useAuth0();
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
-  const [drawerOpen, setDrawerOpen]           = useState(!isMobile);
-  const [anchorEl, setAnchorEl]               = useState<null | HTMLElement>(null);
-  const [portalToken, setPortalToken]         = useState<string | null>(null);
-  const [authBootstrapping, setAuthBootstrapping] = useState(true);
-  const restoredTokenRef = useRef(false);
-
+  const [drawerOpen, setDrawerOpen]               = useState(!isMobile);
+  const [anchorEl, setAnchorEl]                   = useState<null | HTMLElement>(null);
   // Notifications state
-  const [notifAnchor, setNotifAnchor]         = useState<null | HTMLElement>(null);
-  const [notifications, setNotifications]     = useState<any[]>([]);
-  const [readIds, setReadIds]                 = useState<Set<string>>(getReadIds);
-  const [notifLoading, setNotifLoading]       = useState(false);
+  const [notifAnchor, setNotifAnchor]   = useState<null | HTMLElement>(null);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [readIds, setReadIds]           = useState<Set<string>>(getReadIds);
+  const [notifLoading, setNotifLoading] = useState(false);
   const notifOpen = Boolean(notifAnchor);
-
-  // Restore portal JWT on reload
-  useEffect(() => {
-    const savedToken = getSavedAuthToken();
-    if (savedToken) {
-      restoredTokenRef.current = true;
-      setPortalToken(savedToken);
-      setAuthToken(savedToken);
-      setAuthBootstrapping(false);
-    }
-  }, []);
-
-  // Exchange Auth0 token for portal JWT
-  useEffect(() => {
-    if (portalToken || restoredTokenRef.current) {
-      setAuthBootstrapping(false);
-      return;
-    }
-    (async () => {
-      try {
-        const auth0Token = await getAccessTokenSilently();
-        const result = await auth0Exchange(auth0Token);
-        if (result.access_token) { setPortalToken(result.access_token); setAuthToken(result.access_token); return; }
-      } catch {}
-      try {
-        if (user?.email) {
-          const result = await devLogin(user.email, 'devpassword');
-          if (result.access_token) { setPortalToken(result.access_token); setAuthToken(result.access_token); return; }
-        }
-      } catch {}
-      try {
-        const result = await devLogin('admin@enterprise.com', 'admin123');
-        if (result.access_token) { setPortalToken(result.access_token); setAuthToken(result.access_token); }
-      } catch (e) { console.error('All auth methods failed:', e); }
-      finally { setAuthBootstrapping(false); }
-    })();
-  }, [getAccessTokenSilently, portalToken, user?.email]);
 
   // Fetch notifications
   const fetchNotifications = useCallback(async () => {
@@ -163,13 +122,10 @@ export default function Layout() {
   }, []);
 
   useEffect(() => {
-    if (!authBootstrapping) {
-      fetchNotifications();
-      // Poll every 60 s
-      const t = setInterval(fetchNotifications, 60000);
-      return () => clearInterval(t);
-    }
-  }, [authBootstrapping, fetchNotifications]);
+    fetchNotifications();
+    const t = setInterval(fetchNotifications, 60000);
+    return () => clearInterval(t);
+  }, [fetchNotifications]);
 
   const unreadCount = notifications.filter(n => !readIds.has(n.id)).length;
 
@@ -195,8 +151,7 @@ export default function Layout() {
   };
 
   const handleLogout = () => {
-    setAuthToken(null);
-    logout({ logoutParams: { returnTo: window.location.origin } });
+    logout();
   };
 
   const currentTitle = NAV_ITEMS.find(n => location.pathname.startsWith(n.path))?.label || 'Portal';
@@ -501,13 +456,7 @@ export default function Layout() {
           minHeight: 'calc(100vh - 64px)',
         }}
       >
-        {authBootstrapping ? (
-          <Box display="flex" justifyContent="center" alignItems="center" minHeight={300}>
-            <CircularProgress size={32} />
-          </Box>
-        ) : (
-          <Outlet />
-        )}
+        <Outlet />
       </Box>
     </Box>
   );

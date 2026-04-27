@@ -17,7 +17,7 @@ help:
 	@echo "  make test        - Run all service tests"
 	@echo "  make frontend    - Start React dev server only"
 	@echo "  make infra-up    - Apply Terraform (GCP infra)"
-	@echo "  make k8s-deploy  - Deploy all to GKE"
+	@echo "  make cloud-run-deploy - Deploy all services to Cloud Run"
 
 up:
 	$(DOCKER_COMPOSE) up -d
@@ -57,14 +57,9 @@ test:
 frontend:
 	cd frontend && npm start
 
-# GCP / Kubernetes
+# GCP / Serverless
 gcp-auth:
 	gcloud auth application-default login
-
-gke-get-creds:
-	gcloud container clusters get-credentials enterprise-portal-cluster \
-		--region us-central1 \
-		--project $(GCP_PROJECT_ID)
 
 infra-init:
 	cd infrastructure/terraform && terraform init
@@ -78,24 +73,19 @@ infra-up:
 infra-down:
 	cd infrastructure/terraform && terraform destroy -auto-approve
 
-k8s-deploy:
-	kubectl apply -f infrastructure/k8s/namespace.yaml
-	kubectl apply -f infrastructure/k8s/configmap.yaml
-	kubectl apply -f infrastructure/k8s/
-	kubectl rollout status deployment -n enterprise-portal
+cloud-run-deploy:
+	gcloud builds submit --config cloudbuild-serverless.yaml \
+		--substitutions="_PROJECT_ID=$${GCP_PROJECT_ID:-enterprise-portal-48689},_REGION=$${GCP_REGION:-us-central1},_KAFKA_BROKERS=$${KAFKA_BROKERS:-REPLACE_WITH_MANAGED_KAFKA_BOOTSTRAP:9092},_REACT_APP_API_URL=$${REACT_APP_API_URL:-http://localhost:8080},_OKTA_ISSUER=$${OKTA_ISSUER:-https://trial-5413467.okta.com/oauth2/default},_OKTA_CLIENT_ID=$${OKTA_CLIENT_ID:-0oa12cfmwjeBVrl0I698},_OKTA_REDIRECT_URI=$${OKTA_REDIRECT_URI:-http://localhost:3000/authorization-code/callback},_OKTA_LOGOUT_REDIRECT_URI=$${OKTA_LOGOUT_REDIRECT_URI:-http://localhost:3000},_IMAGE_TAG=$$(git rev-parse --short HEAD 2>/dev/null || echo manual)"
 
-k8s-status:
-	kubectl get all -n enterprise-portal
+cloud-run-status:
+	gcloud run services list --region $${GCP_REGION:-us-central1}
 
-k8s-logs:
-	kubectl logs -n enterprise-portal -l app=api-gateway -f
-
-# Docker build & push to GCR
+# Docker build & push to Artifact Registry
 docker-push:
 	@GCP_PROJECT_ID=$$(grep GCP_PROJECT_ID .env | cut -d= -f2); \
 	for svc in $(SERVICES); do \
-		docker build -t gcr.io/$$GCP_PROJECT_ID/enterprise-portal-$$svc:latest backend/$$svc; \
-		docker push gcr.io/$$GCP_PROJECT_ID/enterprise-portal-$$svc:latest; \
+		docker build -t us-central1-docker.pkg.dev/$$GCP_PROJECT_ID/enterprise-portal/$$svc:latest backend/$$svc; \
+		docker push us-central1-docker.pkg.dev/$$GCP_PROJECT_ID/enterprise-portal/$$svc:latest; \
 	done; \
-	docker build -t gcr.io/$$GCP_PROJECT_ID/enterprise-portal-frontend:latest frontend; \
-	docker push gcr.io/$$GCP_PROJECT_ID/enterprise-portal-frontend:latest
+	docker build -t us-central1-docker.pkg.dev/$$GCP_PROJECT_ID/enterprise-portal/frontend:latest frontend; \
+	docker push us-central1-docker.pkg.dev/$$GCP_PROJECT_ID/enterprise-portal/frontend:latest

@@ -19,7 +19,7 @@ echo "Registry: ${AR_REPO}"
 # Authenticate
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-SERVICES=("api-gateway" "auth-service" "data-service" "file-service" "ai-service" "analytics-service")
+SERVICES=("api-gateway" "auth-service" "data-service" "file-service" "ai-service" "analytics-service" "parser-service")
 
 for svc in "${SERVICES[@]}"; do
   echo ""
@@ -40,8 +40,10 @@ echo ""
 echo ">>> Building frontend..."
 docker build \
   --build-arg REACT_APP_API_URL="https://portal.yourdomain.com" \
-  --build-arg REACT_APP_AUTH0_DOMAIN="dev-xbnsordr5elttyug.us.auth0.com" \
-  --build-arg REACT_APP_AUTH0_CLIENT_ID="x8pFzWFtyYCBXrr6U2NkxABroQqqMvxM" \
+  --build-arg REACT_APP_OKTA_ISSUER="${OKTA_ISSUER:-https://dev-example.okta.com/oauth2/default}" \
+  --build-arg REACT_APP_OKTA_CLIENT_ID="${OKTA_CLIENT_ID:-your-okta-client-id}" \
+  --build-arg REACT_APP_OKTA_REDIRECT_URI="${OKTA_REDIRECT_URI:-https://portal.yourdomain.com/authorization-code/callback}" \
+  --build-arg REACT_APP_OKTA_LOGOUT_REDIRECT_URI="${OKTA_LOGOUT_REDIRECT_URI:-https://portal.yourdomain.com}" \
   --tag "${AR_REPO}/frontend:${TAG}" \
   --tag "${AR_REPO}/frontend:latest" \
   --cache-from "${AR_REPO}/frontend:latest" \

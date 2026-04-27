@@ -1,19 +1,3 @@
-output "gke_cluster_name" {
-  value       = google_container_cluster.portal_cluster.name
-  description = "GKE cluster name"
-}
-
-output "gke_endpoint" {
-  value       = google_container_cluster.portal_cluster.endpoint
-  description = "GKE cluster endpoint"
-  sensitive   = true
-}
-
-output "get_credentials_command" {
-  value       = "gcloud container clusters get-credentials ${google_container_cluster.portal_cluster.name} --region ${var.region} --project ${var.project_id}"
-  description = "Command to configure kubectl"
-}
-
 output "cloud_sql_connection_name" {
   value       = google_sql_database_instance.portal_db.connection_name
   description = "Cloud SQL connection name (for Cloud SQL Proxy)"
@@ -78,13 +62,28 @@ output "secret_db_password_id" {
 }
 
 output "cloud_armor_policy" {
-  value       = google_compute_security_policy.portal_armor.name
+  value       = try(google_compute_security_policy.portal_armor[0].name, "disabled (set enable_cloud_armor=true and request SECURITY_POLICIES quota)")
   description = "Cloud Armor WAF policy name"
 }
 
 output "cloud_run_parser_url" {
-  value       = google_cloud_run_v2_service.parser_service.uri
+  value       = try(google_cloud_run_v2_service.parser_service[0].uri, "disabled (set deploy_serverless=true)")
   description = "Cloud Run URL for parser-service (serverless burst)"
+}
+
+output "cloud_run_frontend_url" {
+  value       = try(google_cloud_run_v2_service.frontend[0].uri, "disabled (set deploy_serverless=true)")
+  description = "Public Cloud Run URL for the React frontend"
+}
+
+output "cloud_run_api_gateway_url" {
+  value       = try(google_cloud_run_v2_service.api_gateway[0].uri, "disabled (set deploy_serverless=true)")
+  description = "Public Cloud Run URL for the API gateway"
+}
+
+output "cloud_run_ai_service_url" {
+  value       = try(google_cloud_run_v2_service.ai_service[0].uri, "disabled (set deploy_serverless=true)")
+  description = "Internal Cloud Run URL for the Kafka-backed AI service"
 }
 
 output "kms_keyring" {
@@ -108,31 +107,17 @@ output "lb_ip" {
 }
 
 output "cloud_build_main_trigger" {
-  value       = google_cloudbuild_trigger.main_branch.name
+  value       = try(google_cloudbuild_trigger.main_branch[0].name, "disabled (set enable_cloud_build_triggers=true after repo connection)")
   description = "Cloud Build trigger that runs on push to main"
-}
-
-output "tasks_queue" {
-  value       = google_cloud_tasks_queue.ai_rerank.name
-  description = "Cloud Tasks queue for AI re-ranking jobs"
-}
-
-output "cloud_function_file_ingest" {
-  value       = google_cloudfunctions2_function.file_ingest.name
-  description = "Cloud Function (Gen2) reacting to GCS finalize"
-}
-
-output "scheduler_nightly_summary" {
-  value       = google_cloud_scheduler_job.nightly_summary.name
-  description = "Cloud Scheduler job for nightly summary refresh"
 }
 
 output "setup_summary" {
   value       = <<-EOT
   =========================================================
-   Enterprise Portal — GCP Infrastructure Ready
+   Enterprise Portal — Serverless GCP Infrastructure Ready
   =========================================================
-   GKE Cluster  : ${google_container_cluster.portal_cluster.name} (${var.region})
+   Frontend      : ${try(google_cloud_run_v2_service.frontend[0].uri, "not deployed")}
+   API Gateway   : ${try(google_cloud_run_v2_service.api_gateway[0].uri, "not deployed")}
    Cloud SQL     : ${google_sql_database_instance.portal_db.connection_name}
    Redis         : ${google_redis_instance.portal_redis.host}
    Artifact Reg  : ${var.region}-docker.pkg.dev/${var.project_id}/enterprise-portal
@@ -140,8 +125,8 @@ output "setup_summary" {
    Jenkins VM    : ${google_compute_instance.jenkins.name} (${var.zone})
 
    Next steps:
-   1. gcloud container clusters get-credentials ${google_container_cluster.portal_cluster.name} --region ${var.region}
-   2. kubectl apply -f infrastructure/k8s/
+   1. Configure GitHub webhook to Jenkins /github-webhook/
+   2. Jenkins runs cloudbuild-serverless.yaml
    3. Access Jenkins: gcloud compute ssh jenkins-server --tunnel-through-iap --zone ${var.zone} -- -L 8080:localhost:8080
   =========================================================
   EOT

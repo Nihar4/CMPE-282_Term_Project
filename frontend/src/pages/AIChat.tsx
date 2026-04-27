@@ -122,72 +122,64 @@ I can answer questions about your employee data and uploaded documents. Toggle *
     setInput('');
     setLoading(true);
 
-    let accumulated = '';
-    let thinking = '';
-
     try {
-      const response = await fetch(
-        `${process.env.REACT_APP_API_URL || 'http://localhost:8080'}/api/ai/stream`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': api.defaults.headers.common['Authorization'] as string || '',
-          },
-          body: JSON.stringify({ question, include_docs: includeDocs }),
+      const queued = await api.post('/api/ai/jobs', { question, include_docs: includeDocs });
+      const jobId = queued.data.job_id;
+
+      setMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          role: 'assistant',
+          content: `Queued in Kafka as job \`${jobId}\`. Waiting for an AI worker...`,
+          loading: true,
+          includedDocs: includeDocs,
+        };
+        return updated;
+      });
+
+      let result: any = null;
+      for (let attempt = 0; attempt < 90; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const statusResp = await api.get(`/api/ai/jobs/${jobId}`);
+        result = statusResp.data;
+
+        if (result.status === 'queued' || result.status === 'running') {
+          const elapsed = result.updated_at
+            ? Math.max(0, Math.round((Date.now() - new Date(result.updated_at).getTime()) / 1000))
+            : attempt + 1;
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = {
+              role: 'assistant',
+              content: `${result.status === 'queued' ? 'Queued in Kafka' : 'AI worker is processing'}... (${elapsed}s)`,
+              loading: true,
+              includedDocs: includeDocs,
+            };
+            return updated;
+          });
+          continue;
         }
-      );
-
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      if (!response.body) throw new Error('No response body');
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const text = decoder.decode(value, { stream: true });
-        for (const line of text.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.thinking) thinking += parsed.thinking;
-            if (parsed.content) accumulated += parsed.content;
-            if (parsed.error) throw new Error(parsed.error);
-
-            setMessages(prev => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last.role === 'assistant') {
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: accumulated,
-                  reasoning: thinking,
-                  loading: false,
-                  includedDocs: includeDocs,
-                };
-              }
-              return updated;
-            });
-          } catch {}
-        }
+        break;
       }
 
-      if (!accumulated) {
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            role: 'assistant',
-            content: 'No response received. Please try again.',
-            error: true,
-          };
-          return updated;
-        });
+      if (!result || result.status === 'queued' || result.status === 'running') {
+        throw new Error('AI job is still processing. Check notifications/history in a moment.');
       }
+      if (result.status === 'error') {
+        throw new Error(result.error || 'AI job failed');
+      }
+
+      setMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          role: 'assistant',
+          content: result.answer || 'No response received. Please try again.',
+          reasoning: result.reasoning,
+          loading: false,
+          includedDocs: includeDocs,
+        };
+        return updated;
+      });
     } catch (e: any) {
       setMessages(prev => {
         const updated = [...prev];
@@ -306,7 +298,7 @@ I can answer questions about your employee data and uploaded documents. Toggle *
                   }}>
                     <CircularProgress size={14} />
                     <Typography variant="caption" color="text.secondary">
-                      Thinking… querying database{includeDocs && files.length > 0 ? ' + documents' : ''}
+                      Kafka queued… AI worker processing database{includeDocs && files.length > 0 ? ' + documents' : ''}
                     </Typography>
                   </Box>
                 ) : (
@@ -418,7 +410,7 @@ I can answer questions about your employee data and uploaded documents. Toggle *
             </IconButton>
           </Box>
           <Typography variant="caption" color="text.disabled" mt={0.5} display="block">
-            Enter to send · Shift+Enter for new line · Always streaming · {includeDocs ? 'DB + Docs mode' : 'Database mode'}
+            Enter to send · Shift+Enter for new line · Kafka queued · {includeDocs ? 'DB + Docs mode' : 'Database mode'}
           </Typography>
         </Box>
       </Card>

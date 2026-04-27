@@ -45,19 +45,23 @@ func (User) TableName() string { return "users" }
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Port            string
-	DBDSN           string
-	RedisURL        string
-	JWTSecret       []byte
-	JWTExpiry       time.Duration
-	OktaDomain        string
-	OktaClientID      string
-	OktaClientSecret  string
-	OktaRedirectURI   string
-	Auth0Domain       string
-	Auth0ClientID     string
-	Auth0ClientSecret string
-	DevMode           bool
+	Port                  string
+	DBDSN                 string
+	RedisURL              string
+	RedisAuth             string
+	JWTSecret             []byte
+	JWTExpiry             time.Duration
+	OktaDomain           string
+	OktaIssuer           string
+	OktaClientID         string
+	OktaClientSecret     string
+	OktaRedirectURI      string
+	OktaLogoutRedirectURI string
+	Auth0Domain           string
+	Auth0ClientID         string
+	Auth0ClientSecret     string
+	FrontendURL           string
+	DevMode               bool
 }
 
 func loadConfig() *Config {
@@ -71,17 +75,31 @@ func loadConfig() *Config {
 			getEnv("DB_NAME", "enterprise_portal"),
 		),
 		RedisURL:          getEnv("REDIS_URL", "localhost:6379"),
+		RedisAuth:         getEnv("REDIS_AUTH", ""),
 		JWTSecret:         []byte(getEnv("JWT_SECRET", "change-me-in-production")),
 		JWTExpiry:         8 * time.Hour,
-		OktaDomain:        getEnv("OKTA_DOMAIN", "dev-example.okta.com"),
-		OktaClientID:      getEnv("OKTA_CLIENT_ID", ""),
-		OktaClientSecret:  getEnv("OKTA_CLIENT_SECRET", ""),
-		OktaRedirectURI:   getEnv("OKTA_REDIRECT_URI", "http://localhost:8080/api/auth/callback"),
-		Auth0Domain:       getEnv("AUTH0_DOMAIN", "dev-xbnsordr5elttyug.us.auth0.com"),
-		Auth0ClientID:     getEnv("AUTH0_CLIENT_ID", "x8pFzWFtyYCBXrr6U2NkxABroQqqMvxM"),
-		Auth0ClientSecret: getEnv("AUTH0_CLIENT_SECRET", ""),
-		DevMode:           getEnv("DEV_MODE", "true") == "true",
+		OktaDomain:            getEnv("OKTA_DOMAIN", "dev-example.okta.com"),
+		OktaIssuer:            normalizeIssuer(getEnv("OKTA_ISSUER", "")),
+		OktaClientID:          getEnv("OKTA_CLIENT_ID", ""),
+		OktaClientSecret:      getEnv("OKTA_CLIENT_SECRET", ""),
+		OktaRedirectURI:       getEnv("OKTA_REDIRECT_URI", "http://localhost:3000/authorization-code/callback"),
+		OktaLogoutRedirectURI: getEnv("OKTA_LOGOUT_REDIRECT_URI", "http://localhost:3000"),
+		Auth0Domain:           getEnv("AUTH0_DOMAIN", "dev-xbnsordr5elttyug.us.auth0.com"),
+		Auth0ClientID:         getEnv("AUTH0_CLIENT_ID", "x8pFzWFtyYCBXrr6U2NkxABroQqqMvxM"),
+		Auth0ClientSecret:     getEnv("AUTH0_CLIENT_SECRET", ""),
+		FrontendURL:           strings.TrimRight(getEnv("FRONTEND_URL", "http://localhost:3000"), "/"),
+		DevMode:               getEnv("DEV_MODE", "true") == "true",
 	}
+}
+
+func normalizeIssuer(issuer string) string {
+	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
+	if issuer == "" {
+		domain := strings.TrimRight(strings.TrimSpace(getEnv("OKTA_DOMAIN", "dev-example.okta.com")), "/")
+		domain = strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
+		return "https://" + domain + "/oauth2/default"
+	}
+	return issuer
 }
 
 func getEnv(key, def string) string {
@@ -131,6 +149,10 @@ type AuthHandler struct {
 	db    *gorm.DB
 	rdb   *redis.Client
 	cfg   *Config
+}
+
+func redisOpContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
 // POST /api/auth/dev-login — only available when DEV_MODE=true
@@ -209,13 +231,23 @@ func (h *AuthHandler) DevLogin(c *gin.Context) {
 
 // GET /api/auth/login — Redirect to Okta
 func (h *AuthHandler) OktaLogin(c *gin.Context) {
+	if h.cfg.OktaClientID == "" || h.cfg.OktaClientSecret == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Okta OIDC is not configured"})
+		return
+	}
+
 	state, _ := generateRefreshToken()
-	ctx := context.Background()
-	h.rdb.Set(ctx, "okta_state:"+state, "1", 10*time.Minute)
+	ctx, cancel := redisOpContext()
+	defer cancel()
+	if err := h.rdb.Set(ctx, "okta_state:"+state, "1", 10*time.Minute).Err(); err != nil {
+		log.Printf("Okta login state storage failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "login state store unavailable"})
+		return
+	}
 
 	authURL := fmt.Sprintf(
-		"https://%s/oauth2/default/v1/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email&state=%s",
-		h.cfg.OktaDomain,
+		"%s/v1/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=openid+profile+email&state=%s",
+		h.cfg.OktaIssuer,
 		url.QueryEscape(h.cfg.OktaClientID),
 		url.QueryEscape(h.cfg.OktaRedirectURI),
 		state,
@@ -228,15 +260,24 @@ func (h *AuthHandler) OktaCallback(c *gin.Context) {
 	code := c.Query("code")
 	state := c.Query("state")
 
-	ctx := context.Background()
-	if val := h.rdb.Get(ctx, "okta_state:"+state).Val(); val == "" {
+	ctx, cancel := redisOpContext()
+	stateValue, err := h.rdb.Get(ctx, "okta_state:"+state).Result()
+	cancel()
+	if err == redis.Nil || stateValue == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid state"})
 		return
 	}
+	if err != nil {
+		log.Printf("Okta callback state lookup failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "login state store unavailable"})
+		return
+	}
+	ctx, cancel = redisOpContext()
 	h.rdb.Del(ctx, "okta_state:"+state)
+	cancel()
 
-	// Exchange code for token
-	tokenURL := fmt.Sprintf("https://%s/oauth2/default/v1/token", h.cfg.OktaDomain)
+	// Exchange code for tokens on the backend so the client secret never reaches the browser.
+	tokenURL := fmt.Sprintf("%s/v1/token", h.cfg.OktaIssuer)
 	resp, err := http.PostForm(tokenURL, url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -253,11 +294,12 @@ func (h *AuthHandler) OktaCallback(c *gin.Context) {
 	var tokenResp struct {
 		AccessToken string `json:"access_token"`
 		IDToken     string `json:"id_token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 	json.NewDecoder(resp.Body).Decode(&tokenResp)
 
 	// Get user info from Okta
-	userInfoURL := fmt.Sprintf("https://%s/oauth2/default/v1/userinfo", h.cfg.OktaDomain)
+	userInfoURL := fmt.Sprintf("%s/v1/userinfo", h.cfg.OktaIssuer)
 	req, _ := http.NewRequest("GET", userInfoURL, nil)
 	req.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 	uiResp, err := http.DefaultClient.Do(req)
@@ -292,11 +334,95 @@ func (h *AuthHandler) OktaCallback(c *gin.Context) {
 		h.db.Model(&user).Updates(User{Name: oktaUser.Name, OktaID: oktaUser.Sub, LastLoginAt: &now})
 	}
 
-	accessToken, _ := generateToken(&user, h.cfg.JWTSecret, h.cfg.JWTExpiry)
-	c.SetCookie("portal_token", accessToken, int(h.cfg.JWTExpiry.Seconds()), "/", "", false, true)
+	accessToken, err := generateToken(&user, h.cfg.JWTSecret, h.cfg.JWTExpiry)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
+		return
+	}
+	refreshToken, _ := generateRefreshToken()
+	ctx, cancel = redisOpContext()
+	if err := h.rdb.Set(ctx, "refresh:"+refreshToken, user.ID.String(), 7*24*time.Hour).Err(); err != nil {
+		cancel()
+		log.Printf("Refresh token storage failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "session store unavailable"})
+		return
+	}
+	if tokenResp.IDToken != "" {
+		if err := h.rdb.Set(ctx, "okta_id_token:"+refreshToken, tokenResp.IDToken, 7*24*time.Hour).Err(); err != nil {
+			cancel()
+			log.Printf("Okta ID token storage failed: %v", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "session store unavailable"})
+			return
+		}
+	}
+	cancel()
 
-	// Redirect to frontend
-	c.Redirect(http.StatusFound, "http://localhost:3000/dashboard")
+	secureCookie := strings.HasPrefix(h.cfg.FrontendURL, "https://")
+	if secureCookie {
+		c.SetSameSite(http.SameSiteNoneMode)
+	} else {
+		c.SetSameSite(http.SameSiteLaxMode)
+	}
+	c.SetCookie("portal_token", accessToken, int(h.cfg.JWTExpiry.Seconds()), "/", "", secureCookie, true)
+	c.SetCookie("portal_refresh", refreshToken, int((7*24*time.Hour).Seconds()), "/", "", secureCookie, true)
+
+	handoffToken, _ := generateRefreshToken()
+	sessionPayload, err := json.Marshal(gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(h.cfg.JWTExpiry.Seconds()),
+		"user": gin.H{
+			"id":         user.ID,
+			"email":      user.Email,
+			"name":       user.Name,
+			"role":       user.Role,
+			"department": user.Department,
+			"avatar_url": user.AvatarURL,
+		},
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session handoff failed"})
+		return
+	}
+	ctx, cancel = redisOpContext()
+	if err := h.rdb.Set(ctx, "login_session:"+handoffToken, sessionPayload, 2*time.Minute).Err(); err != nil {
+		cancel()
+		log.Printf("Login session handoff storage failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "session handoff unavailable"})
+		return
+	}
+	cancel()
+
+	c.Redirect(http.StatusFound, h.cfg.FrontendURL+"/authorization-code/callback?session="+url.QueryEscape(handoffToken))
+}
+
+// GET /api/auth/session — Exchanges a one-time Okta callback handoff for a portal JWT.
+func (h *AuthHandler) Session(c *gin.Context) {
+	sessionID := c.Query("session")
+	if sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing session"})
+		return
+	}
+
+	ctx, cancel := redisOpContext()
+	payload, err := h.rdb.Get(ctx, "login_session:"+sessionID).Result()
+	if err == nil {
+		h.rdb.Del(ctx, "login_session:"+sessionID)
+	}
+	cancel()
+
+	if err == redis.Nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "login session expired"})
+		return
+	}
+	if err != nil {
+		log.Printf("Login session handoff lookup failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "session handoff unavailable"})
+		return
+	}
+
+	c.Data(http.StatusOK, "application/json; charset=utf-8", []byte(payload))
 }
 
 // POST /api/auth/auth0-exchange — Exchange Auth0 access token for portal JWT
@@ -470,11 +596,73 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	c.ShouldBindJSON(&req)
-	if req.RefreshToken != "" {
-		h.rdb.Del(context.Background(), "refresh:"+req.RefreshToken)
+	refreshToken := req.RefreshToken
+	if refreshToken == "" {
+		refreshToken, _ = c.Cookie("portal_refresh")
 	}
-	c.SetCookie("portal_token", "", -1, "/", "", false, true)
+	if refreshToken != "" {
+		ctx, cancel := redisOpContext()
+		h.rdb.Del(ctx, "refresh:"+refreshToken, "okta_id_token:"+refreshToken)
+		cancel()
+	}
+	secureCookie := strings.HasPrefix(h.cfg.FrontendURL, "https://")
+	if secureCookie {
+		c.SetSameSite(http.SameSiteNoneMode)
+	} else {
+		c.SetSameSite(http.SameSiteLaxMode)
+	}
+	c.SetCookie("portal_token", "", -1, "/", "", secureCookie, true)
+	c.SetCookie("portal_refresh", "", -1, "/", "", secureCookie, true)
 	c.JSON(http.StatusOK, gin.H{"message": "logged out successfully"})
+}
+
+// GET /api/auth/logout — clears the portal session and redirects to Okta logout.
+func (h *AuthHandler) LogoutRedirect(c *gin.Context) {
+	refreshToken, _ := c.Cookie("portal_refresh")
+	var idToken string
+	if refreshToken != "" {
+		ctx, cancel := redisOpContext()
+		idToken = h.rdb.Get(ctx, "okta_id_token:"+refreshToken).Val()
+		h.rdb.Del(ctx, "refresh:"+refreshToken, "okta_id_token:"+refreshToken)
+		cancel()
+	}
+
+	secureCookie := strings.HasPrefix(h.cfg.FrontendURL, "https://")
+	if secureCookie {
+		c.SetSameSite(http.SameSiteNoneMode)
+	} else {
+		c.SetSameSite(http.SameSiteLaxMode)
+	}
+	c.SetCookie("portal_token", "", -1, "/", "", secureCookie, true)
+	c.SetCookie("portal_refresh", "", -1, "/", "", secureCookie, true)
+
+	logoutURL := fmt.Sprintf("%s/v1/logout?post_logout_redirect_uri=%s",
+		h.cfg.OktaIssuer,
+		url.QueryEscape(h.cfg.OktaLogoutRedirectURI),
+	)
+	if idToken != "" {
+		logoutURL += "&id_token_hint=" + url.QueryEscape(idToken)
+	}
+	c.Redirect(http.StatusFound, logoutURL)
+}
+
+// GET /api/auth/logout-token — returns the Okta ID token hint for SDK logout.
+func (h *AuthHandler) LogoutToken(c *gin.Context) {
+	refreshToken, _ := c.Cookie("portal_refresh")
+	if refreshToken == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no active Okta session"})
+		return
+	}
+
+	ctx, cancel := redisOpContext()
+	idToken := h.rdb.Get(ctx, "okta_id_token:"+refreshToken).Val()
+	cancel()
+	if idToken == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Okta id token not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"id_token": idToken})
 }
 
 // GET /api/auth/users — Admin: list users
@@ -505,7 +693,7 @@ func main() {
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL})
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL, Password: cfg.RedisAuth})
 	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
 		log.Printf("Redis connection warning: %v (continuing without Redis)", err)
 	}
@@ -532,6 +720,9 @@ func main() {
 		auth.POST("/auth0-exchange", h.Auth0Exchange)
 		auth.GET("/login", h.OktaLogin)
 		auth.GET("/callback", h.OktaCallback)
+		auth.GET("/session", h.Session)
+		auth.GET("/logout-token", h.LogoutToken)
+		auth.GET("/logout", h.LogoutRedirect)
 		auth.POST("/logout", h.Logout)
 		auth.POST("/refresh", h.Refresh)
 		auth.GET("/me", h.Me)

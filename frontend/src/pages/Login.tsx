@@ -1,6 +1,6 @@
 import React from 'react';
-import { useAuth0 } from '@auth0/auth0-react';
-import { Navigate, useLocation } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
 import {
   Box, Button, Typography, Card, CardContent, Divider,
   CircularProgress, Stack, Chip,
@@ -15,12 +15,11 @@ const FEATURES = [
   { icon: <StorageIcon />, label: 'Enterprise Data Browser',   desc: 'Employees, products, sales & inventory' },
   { icon: <AIIcon />,      label: 'AI-Powered Query Engine',   desc: 'Ask questions in plain English' },
   { icon: <ChartIcon />,   label: 'Real-time Analytics',       desc: 'Dashboards, trends & KPI reports' },
-  { icon: <SecurityIcon />,label: 'Secure SSO via Auth0',      desc: 'Enterprise-grade authentication' },
+  { icon: <SecurityIcon />,label: 'Secure SSO via Okta OIDC',  desc: 'Enterprise-grade authentication' },
 ];
 
 export default function Login() {
-  const { loginWithRedirect, isAuthenticated, isLoading } = useAuth0();
-  const location = useLocation();
+  const { loginWithOkta, isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
     return (
@@ -88,10 +87,10 @@ export default function Login() {
               Sign In
             </Typography>
             <Typography variant="body2" color="text.secondary" mb={3}>
-              Authenticate with your enterprise credentials via Auth0 SSO.
+              Authenticate with your enterprise credentials via Okta SSO.
             </Typography>
 
-            <Chip label="Secured by Auth0" size="small" color="primary" variant="outlined"
+            <Chip label="Secured by Okta OIDC" size="small" color="primary" variant="outlined"
               icon={<SecurityIcon />} sx={{ mb: 3 }} />
 
             <Button
@@ -99,7 +98,7 @@ export default function Login() {
               variant="contained"
               size="large"
               startIcon={<LoginIcon />}
-              onClick={() => loginWithRedirect({ appState: { returnTo: `${location.pathname}${location.search}` } })}
+              onClick={loginWithOkta}
               sx={{
                 py: 1.5,
                 fontSize: 15,
@@ -107,7 +106,7 @@ export default function Login() {
                 '&:hover': { background: 'linear-gradient(135deg, #283593, #0277bd)' },
               }}
             >
-              Sign in with Auth0 SSO
+              Sign in with Okta SSO
             </Button>
 
             <Divider sx={{ my: 2 }}>
@@ -118,13 +117,10 @@ export default function Login() {
               fullWidth
               variant="outlined"
               size="large"
-              onClick={() => loginWithRedirect({
-                authorizationParams: { screen_hint: 'signup' },
-                appState: { returnTo: `${location.pathname}${location.search}` },
-              })}
+              onClick={loginWithOkta}
               sx={{ py: 1.5, fontSize: 14 }}
             >
-              Create Account
+              Continue with Enterprise SSO
             </Button>
 
             <Typography variant="caption" color="text.secondary" display="block" textAlign="center" mt={3}>

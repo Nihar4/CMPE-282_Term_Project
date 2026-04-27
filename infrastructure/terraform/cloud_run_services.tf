@@ -247,11 +247,18 @@ resource "google_cloud_run_v2_service" "file_service" {
 
     vpc_access {
       connector = google_vpc_access_connector.serverless[0].id
-      egress    = "PRIVATE_RANGES_ONLY"
+      egress    = "ALL_TRAFFIC"
     }
 
     containers {
       image = "${local.cloud_run_image_base}/file-service:${local.cloud_run_image_tag}"
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "1Gi"
+        }
+      }
 
       ports {
         container_port = 8083
@@ -655,5 +662,5 @@ resource "google_cloud_run_v2_service_iam_member" "internal_services_invoker" {
   role     = "roles/run.invoker"
   # Only the Cloud Run service account (used by api-gateway) may invoke internal services.
   # The gateway fetches a Google identity token and presents it as Authorization header.
-  member   = "serviceAccount:${google_service_account.cloud_run_sa[0].email}"
+  member = "serviceAccount:${google_service_account.cloud_run_sa[0].email}"
 }

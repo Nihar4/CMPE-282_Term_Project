@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8080';
+export const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8080';
 const PORTAL_TOKEN_KEY = 'portal_auth_token';
 
 function canUseStorage() {
@@ -31,6 +31,14 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Convenience aliases used by AuthContext
+export function saveAuthToken(token: string) {
+  api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+}
+export function clearAuthToken() {
+  delete api.defaults.headers.common['Authorization'];
+}
+
 // Attach JWT token to every request
 export function setAuthToken(token: string | null) {
   if (token) {
@@ -46,17 +54,10 @@ export function setAuthToken(token: string | null) {
   }
 }
 
-// ─── Dev Login (when not using Auth0) ────────────────────────────────────────
+// ─── Dev Login ───────────────────────────────────────────────────────────────
 
 export async function devLogin(email: string, password: string) {
   const res = await api.post('/api/auth/dev-login', { email, password });
-  return res.data;
-}
-
-// ─── Auth0 Exchange ───────────────────────────────────────────────────────────
-
-export async function auth0Exchange(auth0Token: string) {
-  const res = await api.post('/api/auth/auth0-exchange', { access_token: auth0Token });
   return res.data;
 }
 

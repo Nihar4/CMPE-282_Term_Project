@@ -1,0 +1,119 @@
+# Cloud Build pipeline for the serverless Cloud Run deployment.
+# Required substitutions:
+#   _REGION, _PROJECT_ID, _KAFKA_BROKERS, _REACT_APP_API_URL
+
+substitutions:
+  _REGION: us-central1
+  _PROJECT_ID: enterprise-portal-48689
+  _KAFKA_BROKERS: REPLACE_WITH_MANAGED_KAFKA_BOOTSTRAP:9092
+  _REACT_APP_API_URL: REPLACE_WITH_CLOUD_RUN_API_GATEWAY_URL
+  _OKTA_ISSUER: https://trial-5413467.okta.com/oauth2/default
+  _OKTA_CLIENT_ID: 0oa12cfmwjeBVrl0I698
+  _OKTA_REDIRECT_URI: REPLACE_WITH_CLOUD_RUN_FRONTEND_URL/authorization-code/callback
+  _OKTA_LOGOUT_REDIRECT_URI: REPLACE_WITH_CLOUD_RUN_FRONTEND_URL
+  _IMAGE_TAG: manual
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build-backend-images
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        for svc in api-gateway auth-service data-service file-service ai-service analytics-service; do
+          docker build -t "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/$${svc}:${_IMAGE_TAG}" "backend/$${svc}"
+          docker tag "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/$${svc}:${_IMAGE_TAG}" "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/$${svc}:latest"
+        done
+
+  - id: build-parser
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/parser-service:${_IMAGE_TAG}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/parser-service:latest
+      - backend/parser-service
+
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - REACT_APP_API_URL=${_REACT_APP_API_URL}
+      - --build-arg
+      - REACT_APP_OKTA_ISSUER=${_OKTA_ISSUER}
+      - --build-arg
+      - REACT_APP_OKTA_CLIENT_ID=${_OKTA_CLIENT_ID}
+      - --build-arg
+      - REACT_APP_OKTA_REDIRECT_URI=${_OKTA_REDIRECT_URI}
+      - --build-arg
+      - REACT_APP_OKTA_LOGOUT_REDIRECT_URI=${_OKTA_LOGOUT_REDIRECT_URI}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/frontend:${_IMAGE_TAG}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/frontend:latest
+      - frontend
+
+  - id: push-images
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        for svc in api-gateway auth-service data-service file-service ai-service analytics-service parser-service frontend; do
+          docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/$${svc}:${_IMAGE_TAG}"
+          docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/$${svc}:latest"
+        done
+
+  - id: terraform-apply-serverless
+    name: hashicorp/terraform:1.8
+    dir: infrastructure/terraform
+    entrypoint: sh
+    secretEnv:
+      - TF_VAR_db_password
+      - TF_VAR_jwt_secret
+      - TF_VAR_nvidia_api_key
+      - TF_VAR_okta_client_secret
+    args:
+      - -c
+      - |
+        terraform init -input=false
+        terraform apply -auto-approve \
+          -var="project_id=${_PROJECT_ID}" \
+          -var="region=${_REGION}" \
+          -var="deploy_serverless=true" \
+          -var="image_tag=${_IMAGE_TAG}" \
+          -var="kafka_brokers=${_KAFKA_BROKERS}" \
+          -var="okta_issuer=${_OKTA_ISSUER}" \
+          -var="okta_client_id=${_OKTA_CLIENT_ID}" \
+          -var="okta_redirect_uri=${_OKTA_REDIRECT_URI}" \
+          -var="okta_logout_redirect_uri=${_OKTA_LOGOUT_REDIRECT_URI}" \
+          -var='allowed_origins=["${_OKTA_LOGOUT_REDIRECT_URI}","http://localhost:3000","http://127.0.0.1:3000"]'
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${_PROJECT_ID}/secrets/portal-db-password/versions/latest
+      env: TF_VAR_db_password
+    - versionName: projects/${_PROJECT_ID}/secrets/portal-jwt-secret/versions/latest
+      env: TF_VAR_jwt_secret
+    - versionName: projects/${_PROJECT_ID}/secrets/portal-nvidia-api-key/versions/latest
+      env: TF_VAR_nvidia_api_key
+    - versionName: projects/${_PROJECT_ID}/secrets/portal-okta-client-secret/versions/latest
+      env: TF_VAR_okta_client_secret
+
+images:
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/api-gateway:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/auth-service:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/data-service:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/file-service:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/ai-service:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/analytics-service:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/parser-service:${_IMAGE_TAG}
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/enterprise-portal/frontend:${_IMAGE_TAG}

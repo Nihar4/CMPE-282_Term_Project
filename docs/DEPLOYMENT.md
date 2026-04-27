@@ -1,332 +1,172 @@
 # Deployment Guide
 
-This guide walks through every deployment surface of the Enterprise Knowledge
-Portal — local Docker Compose, single-host Kubernetes (kind/minikube), and the
-**production target on GCP with GKE + Jenkins**.
+This project now uses one production deployment path:
 
-> TL;DR (production target):
->
-> ```bash
-> make infra-up        # Terraform: VPC, GKE, Cloud SQL, GCS, Memorystore, AR
-> make docker-push     # Build & push all images to GCR
-> make k8s-deploy      # kubectl apply all manifests
-> make k8s-status      # verify rollout
-> ```
-
----
-
-## 1. Prerequisites
-
-| Tool                | Version    | Notes                                          |
-| ------------------- | ---------- | ---------------------------------------------- |
-| Docker Desktop      | 24+        | with at least 6 GB RAM allotted                |
-| Docker Compose v2   | bundled    | invoked as `docker compose`                    |
-| Go                  | 1.21       | only if rebuilding services locally            |
-| Node.js             | 20.x LTS   | for `npm start` against the React app          |
-| Python              | 3.11       | only if running `parser-service` natively      |
-| `gcloud` CLI        | latest     | authenticated to your GCP project              |
-| `kubectl`           | 1.28+      | matches GKE control plane                      |
-| Terraform           | 1.5+       |                                                |
-| Make                | any        | optional but recommended                       |
-
-GCP APIs that **must** be enabled (Terraform enables them automatically):
-
-```
-container.googleapis.com
-sqladmin.googleapis.com
-storage.googleapis.com
-servicenetworking.googleapis.com
-redis.googleapis.com
-artifactregistry.googleapis.com
-iam.googleapis.com
-cloudresourcemanager.googleapis.com
-compute.googleapis.com
+```text
+GitHub -> Jenkins -> Cloud Build -> Artifact Registry -> Cloud Run
 ```
 
----
+There is no Kubernetes/GKE deployment path in the project anymore.
 
-## 2. Local — Docker Compose
+## 1. Local Test
 
-`docker-compose.yml` boots the entire stack: Postgres, Redis, Kafka/Zookeeper,
-all 6 backend services, the Python parser, and the React UI.
+Run the full local stack with Docker Compose:
 
 ```bash
-cp .env.example .env       # fill in JWT_SECRET, AUTH0_*, NVIDIA_API_KEY, …
-
-make build                 # docker compose build --parallel
-make up                    # detached
-make seed                  # mock + sample data into postgres
-
-open http://localhost:3000
+cp .env.example .env
+docker compose up -d --build \
+  postgres redis zookeeper kafka \
+  api-gateway auth-service data-service parser-service \
+  file-service ai-service ai-worker analytics-service
 ```
 
-Useful follow-ups:
-
-```bash
-make logs                  # tail -f everything
-docker compose logs -f api-gateway
-docker compose exec postgres psql -U portal_user -d enterprise_portal
-make down                  # stop
-make clean                 # stop + delete volumes + images
-```
-
-### 2.1 Hot-reloading frontend
+Run the frontend locally:
 
 ```bash
 cd frontend
 npm install --legacy-peer-deps
-npm start                  # CRA dev server on :3000 → proxy to API at :8080
+npm start
 ```
 
-### 2.2 Running parser-service natively (debugging)
+Local URLs:
 
-```bash
-cd backend/parser-service
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --port 8090 --reload
+```text
+Frontend:     http://localhost:3000
+API Gateway:  http://localhost:8080
+Parser docs:  http://localhost:8090/docs
 ```
 
----
+## 2. GCP Infrastructure
 
-## 3. Single-Node Kubernetes (kind / minikube)
+Terraform provisions the serverless platform:
 
-```bash
-kind create cluster --name portal --config infrastructure/k8s/kind-config.yaml
-kubectl config use-context kind-portal
+- Cloud Run for frontend, API gateway, auth, data, file, AI, analytics, and parser services
+- Cloud SQL PostgreSQL
+- Memorystore Redis
+- Cloud Storage file bucket
+- Artifact Registry Docker repository
+- Secret Manager for DB/JWT/NVIDIA/Okta secrets
+- Serverless VPC Access for private Cloud SQL and Redis access
+- Jenkins VM on GCE for GitHub webhook driven CI/CD
+- Cloud Monitoring and Cloud Logging
 
-# Build images directly into kind's containerd
-kind load docker-image cloud_final_project-api-gateway:latest --name portal
-# … repeat per service …
-
-kubectl apply -f infrastructure/k8s/namespace.yaml
-kubectl apply -f infrastructure/k8s/configmap.yaml
-kubectl apply -f infrastructure/k8s/postgres.yaml
-kubectl apply -f infrastructure/k8s/redis.yaml
-kubectl apply -f infrastructure/k8s/api-gateway.yaml
-kubectl apply -f infrastructure/k8s/services.yaml
-kubectl apply -f infrastructure/k8s/frontend.yaml
-kubectl apply -f infrastructure/k8s/ingress.yaml
-```
-
-Forward the gateway:
-
-```bash
-kubectl port-forward -n enterprise-portal svc/api-gateway 8080:8080
-```
-
----
-
-## 4. GCP — Production Target
-
-### 4.1 Configure Terraform
+Initialize and apply:
 
 ```bash
 cd infrastructure/terraform
-cp terraform.tfvars.example terraform.tfvars
-# edit:
-#   project_id      = "enterprise-portal-48689"
-#   region          = "us-central1"
-#   cluster_name    = "enterprise-portal-cluster"
-#   db_password     = "<strong>"
-#   gcs_bucket_name = "enterprise-portal-files"
-
 terraform init
-terraform plan
-terraform apply             # ~10–15 min on a clean project
+terraform apply -auto-approve \
+  -var="deploy_serverless=true" \
+  -var="project_id=enterprise-portal-48689" \
+  -var="region=us-central1"
 ```
 
-What this provisions:
+## 3. Jenkins CI/CD
 
-- VPC + subnet (`10.0.0.0/16`) with secondary ranges for pods/services.
-- **GKE Regional cluster** with Workload Identity, HPA, managed Prometheus.
-- **Cloud SQL Postgres 15** REGIONAL HA, PITR, private IP.
-- **Memorystore Redis 7** STANDARD_HA, TLS.
-- **Cloud Storage bucket** with versioning + lifecycle rule.
-- **Artifact Registry** Docker repo `enterprise-portal`.
+Jenkins receives the GitHub webhook and triggers Cloud Build.
 
-### 4.2 Authenticate kubectl
+Required Jenkins credentials:
+
+```text
+github-token
+GCP_SERVICE_ACCOUNT_KEY
+```
+
+Required Jenkins environment values in `Jenkinsfile`:
+
+```text
+GCP_PROJECT_ID=enterprise-portal-48689
+GCP_REGION=us-central1
+KAFKA_BROKERS=<managed kafka bootstrap servers>
+REACT_APP_API_URL=<Cloud Run api-gateway URL>
+OKTA_ISSUER=https://trial-5413467.okta.com/oauth2/default
+OKTA_CLIENT_ID=<Okta OIDC client id>
+OKTA_REDIRECT_URI=<Cloud Run frontend URL>/authorization-code/callback
+OKTA_LOGOUT_REDIRECT_URI=<Cloud Run frontend URL>
+```
+
+GitHub webhook:
+
+```text
+Payload URL: http://<jenkins-host>/github-webhook/
+Content type: application/json
+Events: push
+```
+
+## 4. Cloud Build
+
+Jenkins runs:
 
 ```bash
-gcloud container clusters get-credentials enterprise-portal-cluster \
-    --region us-central1 \
-    --project $GCP_PROJECT_ID
+gcloud builds submit \
+  --config cloudbuild-serverless.yaml \
+  --substitutions "_PROJECT_ID=${GCP_PROJECT_ID},_REGION=${GCP_REGION},_KAFKA_BROKERS=${KAFKA_BROKERS},_REACT_APP_API_URL=${REACT_APP_API_URL},_OKTA_ISSUER=${OKTA_ISSUER},_OKTA_CLIENT_ID=${OKTA_CLIENT_ID},_OKTA_REDIRECT_URI=${OKTA_REDIRECT_URI},_OKTA_LOGOUT_REDIRECT_URI=${OKTA_LOGOUT_REDIRECT_URI}"
 ```
 
-### 4.3 Push images
+Cloud Build then:
 
-Either via Make:
+- Builds all backend images
+- Builds parser-service
+- Builds frontend with Okta and API URL build args
+- Pushes all images to Artifact Registry
+- Runs Terraform with `deploy_serverless=true`
+- Updates Cloud Run services to the latest images
+
+## 5. Manual Deploy
+
+You can bypass Jenkins for testing:
 
 ```bash
-make docker-push
+make cloud-run-deploy
 ```
 
-…or via Jenkins (recommended — see [`CICD.md`](./CICD.md)).
-
-The script tags each image as both `:latest` and `:<git-sha>-<build>` and
-pushes to `gcr.io/$GCP_PROJECT_ID/enterprise-portal-<service>`.
-
-### 4.4 Apply Kubernetes manifests
+Or:
 
 ```bash
-make k8s-deploy
-# = kubectl apply -f infrastructure/k8s/namespace.yaml
-#   kubectl apply -f infrastructure/k8s/configmap.yaml
-#   kubectl apply -f infrastructure/k8s/
-#   kubectl rollout status deployment -n enterprise-portal
+./scripts/deploy.sh
 ```
 
-What gets created:
-
-| Object                                  | Purpose                              |
-| --------------------------------------- | ------------------------------------ |
-| `Namespace enterprise-portal`           | Isolation                            |
-| `ConfigMap portal-config`               | Non-secret env (URLs, models, …)     |
-| `Secret portal-secrets`                 | DB pwd, JWT, NVIDIA key, Auth0 secret|
-| `Deployment / Service` × 7 microservices| Workloads                            |
-| `HorizontalPodAutoscaler` per service   | CPU-based scaling                    |
-| `Deployment / Service frontend`         | Nginx + React build                  |
-| `Ingress portal-ingress`                | Single LB, TLS, path routing         |
-
-### 4.5 Configure DNS + TLS
-
-1. Reserve a global IP:
-   ```bash
-   gcloud compute addresses create portal-ip --global
-   ```
-2. Update your DNS A record (`portal.yourdomain.com`) to that IP.
-3. Edit `infrastructure/k8s/ingress.yaml` so `host:` matches your domain.
-4. Apply — Google-managed cert provisions in 10–15 min.
-
-### 4.6 Database migrations on the cluster
+## 6. Get Cloud Run URLs
 
 ```bash
-kubectl run migration-job-$(date +%s) \
-  --image=postgres:15-alpine --restart=Never \
-  --namespace=enterprise-portal \
-  --env="PGPASSWORD=$(kubectl get secret portal-secrets \
-        -n enterprise-portal -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)" \
-  --command -- psql -h portal-postgres -U portal_user -d enterprise_portal \
-                    -f /migrations/001_init.sql
+gcloud run services list --region us-central1
+gcloud run services describe frontend --region us-central1 --format='value(status.url)'
+gcloud run services describe api-gateway --region us-central1 --format='value(status.url)'
 ```
 
-In Jenkins this is gated behind `RUN_MIGRATIONS=true`.
+After the first deployment, update Okta:
 
-### 4.7 Smoke test
+```text
+Sign-in redirect URI:
+<frontend-url>/authorization-code/callback
+
+Sign-out redirect URI:
+<frontend-url>
+```
+
+Then update Jenkins `OKTA_REDIRECT_URI`, `OKTA_LOGOUT_REDIRECT_URI`, and `REACT_APP_API_URL`, and rerun the pipeline.
+
+## 7. Rollback
+
+Cloud Run keeps revisions. Roll back from the console:
+
+```text
+Cloud Run -> frontend/api-gateway/service -> Revisions -> Manage Traffic
+```
+
+Or with `gcloud`:
 
 ```bash
-INGRESS_IP=$(kubectl -n enterprise-portal get ingress portal-ingress \
-            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-curl -k https://$INGRESS_IP/api/health
+gcloud run services update-traffic api-gateway \
+  --region us-central1 \
+  --to-revisions <previous-revision>=100
 ```
 
----
-
-## 5. Jenkins on GKE (Cloud Jenkins)
-
-### 5.1 Install via Helm
+## 8. Tear Down
 
 ```bash
-kubectl create namespace jenkins
-helm repo add jenkinsci https://charts.jenkins.io
-helm install jenkins jenkinsci/jenkins -n jenkins \
-  --set controller.installPlugins='{kubernetes,workflow-aggregator,git,configuration-as-code,oic-auth,blueocean,gcp-secret-manager}' \
-  --set persistence.size=20Gi \
-  --set controller.serviceType=LoadBalancer
+cd infrastructure/terraform
+terraform destroy
 ```
 
-### 5.2 Required credentials (Jenkins → Manage Credentials)
-
-| ID                          | Type      | Value                                                    |
-| --------------------------- | --------- | -------------------------------------------------------- |
-| `GCP_PROJECT_ID`            | secret    | `enterprise-portal-48689`                                |
-| `GCP_SERVICE_ACCOUNT_KEY`   | file      | JSON key for `jenkins-deployer@<proj>.iam.gserviceaccount.com` |
-| `TF_DB_PASSWORD`            | secret    | DB password (matches Cloud SQL user)                     |
-| `GITHUB_TOKEN`              | username/token | Used for status checks & repo cloning if private    |
-| `OKTA_OIDC_CLIENT`          | secret    | Used by `oic-auth` for SSO login                         |
-
-### 5.3 Pipeline job
-
-- "New Item" → "Multibranch Pipeline" → Branch source: GitHub
-  → Repo: `Nihar4/CMPE-282_Term_Project`.
-- Discover branches: All.
-- Build configuration: by `Jenkinsfile`.
-- Webhook: GitHub → Jenkins URL `/github-webhook/`.
-
-The pipeline is described in detail in [`CICD.md`](./CICD.md).
-
-### 5.4 Connecting Okta SSO to Jenkins
-
-1. Create an Okta OIDC application of type **Web Application** with:
-   - Sign-in redirect: `https://jenkins.example.com/securityRealm/finishLogin`
-   - Sign-out redirect: `https://jenkins.example.com/`
-2. In Jenkins → Configure Global Security → SAML / OIDC:
-   - Use the `oic-auth` plugin.
-   - Provider: Okta `https://<tenant>.okta.com`.
-   - Group claim: `groups` → assign Jenkins roles via the Role Strategy plugin.
-3. Disable "Jenkins's own user database" once SSO works.
-
----
-
-## 6. Rolling Update & Rollback
-
-### 6.1 Update a single service
-
-```bash
-kubectl set image deployment/data-service \
-  data-service=gcr.io/$GCP_PROJECT_ID/enterprise-portal-data-service:abc123 \
-  -n enterprise-portal --record
-kubectl rollout status deployment/data-service -n enterprise-portal
-```
-
-### 6.2 Rollback
-
-```bash
-kubectl rollout undo deployment/data-service -n enterprise-portal
-```
-
-### 6.3 Auto-rollback in pipeline
-
-Already wired in `Jenkinsfile`'s `post.failure` block — every deployment is
-undone on pipeline failure.
-
----
-
-## 7. Backup & Disaster Recovery
-
-| Asset            | Strategy                                                          |
-| ---------------- | ----------------------------------------------------------------- |
-| Cloud SQL DB     | PITR + 30 days of automated backups (`backup_retention_settings`). |
-| GCS bucket       | Object versioning enabled; lifecycle deletes after 365 days.       |
-| Cluster state    | All workloads are idempotent (manifests in Git). Re-`kubectl apply` from `main`. |
-| Terraform state  | Optional GCS backend (uncomment in `main.tf`) for shared state.    |
-
----
-
-## 8. Cost Estimate (rough)
-
-| Resource                              | Approx monthly cost (USD) |
-| ------------------------------------- | -------------------------: |
-| GKE Regional, 3 e2-standard-4 nodes   | ~$220                      |
-| Cloud SQL HA `db-custom-2-7680`       | ~$200                      |
-| Memorystore 2 GB STANDARD_HA          | ~$70                       |
-| Cloud Storage 100 GB + ops            | ~$3                        |
-| Cloud Logging + Managed Prom          | ~$15                       |
-| Egress (educational demo)             | ~$5                        |
-| **Total**                             | **~$510/mo**               |
-
-For a class demo, scaling node pool down to 1 e2-medium and Cloud SQL to a
-shared-core tier brings the total under **$80/mo**.
-
----
-
-## 9. Tear-down
-
-```bash
-make k8s-status                # confirm what's running
-kubectl delete ns enterprise-portal
-make infra-down                # terraform destroy (force-delete protection off)
-```
-
-> Cloud SQL has `deletion_protection = true`. Set it to `false`, re-apply, then
-> destroy.
+Cloud SQL has deletion protection enabled. Disable it intentionally before destroying a production environment.

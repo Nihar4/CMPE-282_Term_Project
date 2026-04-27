@@ -4,7 +4,7 @@
 | --------------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
 | **Aditya Govind Shahari**               | [@adityashahari1][a]            | Frontend & UX, AI integration, demo lead                         |
 | **Mohsen Minai**                        | _pending — share GitHub handle_ | Backend services (Go), security, CORS / JWT / IAM                |
-| **Nihar Dharmeshkumar Patel**           | [@Nihar4][n]                    | Cloud architecture, GCP / Terraform / Kubernetes, CI/CD          |
+| **Nihar Dharmeshkumar Patel**           | [@Nihar4][n]                    | Cloud architecture, GCP / Terraform / Cloud Run, CI/CD           |
 | **Tamizh Selvan Manivannan**            | _pending — share GitHub handle_ | Data engineering, parser-service (Python), analytics             |
 
 [a]: https://github.com/adityashahari1
@@ -32,7 +32,7 @@
 | ---------------------------------------- | --------------------------------- |
 | React 18 + MUI portal, AI Chat, Dashboards | Aditya Govind Shahari            |
 | Go microservices, JWT, RBAC, gateway     | Mohsen Minai                      |
-| GCP infra, Terraform, GKE, Jenkins, Okta | Nihar Dharmeshkumar Patel         |
+| GCP infra, Terraform, Cloud Run, Jenkins, Okta | Nihar Dharmeshkumar Patel   |
 | Python parser service, data pipelines, analytics | Tamizh Selvan Manivannan  |
 
 ## Adding the team as GitHub collaborators
