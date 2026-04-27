@@ -13,11 +13,14 @@ pipeline {
     GCP_REGION       = "us-central1"
     AR_REPO          = "us-central1-docker.pkg.dev/enterprise-portal-48689/enterprise-portal"
     KAFKA_BROKERS    = "REPLACE_WITH_MANAGED_KAFKA_BOOTSTRAP:9092"
-    REACT_APP_API_URL = "http://localhost:8080"
-    OKTA_ISSUER      = "https://dev-example.okta.com/oauth2/default"
-    OKTA_CLIENT_ID   = "your-okta-client-id"
-    OKTA_REDIRECT_URI = "http://localhost:3000/authorization-code/callback"
-    OKTA_LOGOUT_REDIRECT_URI = "http://localhost:3000"
+    // Frontend calls the gateway; baked into the React build at compile time.
+    REACT_APP_API_URL = "https://api-gateway-ogukkf7z3q-uc.a.run.app"
+    OKTA_ISSUER      = "https://trial-5413467.okta.com/oauth2/default"
+    OKTA_CLIENT_ID   = "0oa12cfmwjeBVrl0I698"
+    // Okta sends the auth code back to the gateway, which proxies to auth-service /callback.
+    OKTA_REDIRECT_URI = "https://api-gateway-ogukkf7z3q-uc.a.run.app/api/auth/callback"
+    // After logout Okta redirects back to the frontend.
+    OKTA_LOGOUT_REDIRECT_URI = "https://frontend-ogukkf7z3q-uc.a.run.app"
 
     // Image tag: git short sha + build number
     IMAGE_TAG        = ""   // set in Build stage
@@ -93,13 +96,13 @@ pipeline {
       }
     }
 
-    // ── 4. Trigger Cloud Build serverless deployment ─────────────────────────
+    // ── 4. Trigger Cloud Build serverless deployment to Cloud Run ────────────
     stage('Cloud Build → Cloud Run') {
       steps {
         sh '''
           gcloud builds submit \
             --config cloudbuild-serverless.yaml \
-            --substitutions "_PROJECT_ID=${GCP_PROJECT_ID},_REGION=${GCP_REGION},_KAFKA_BROKERS=${KAFKA_BROKERS},_REACT_APP_API_URL=${REACT_APP_API_URL},_OKTA_ISSUER=${OKTA_ISSUER},_OKTA_CLIENT_ID=${OKTA_CLIENT_ID},_OKTA_REDIRECT_URI=${OKTA_REDIRECT_URI},_OKTA_LOGOUT_REDIRECT_URI=${OKTA_LOGOUT_REDIRECT_URI}"
+            --substitutions "_PROJECT_ID=${GCP_PROJECT_ID},_REGION=${GCP_REGION},_KAFKA_BROKERS=${KAFKA_BROKERS},_REACT_APP_API_URL=${REACT_APP_API_URL},_OKTA_ISSUER=${OKTA_ISSUER},_OKTA_CLIENT_ID=${OKTA_CLIENT_ID},_OKTA_REDIRECT_URI=${OKTA_REDIRECT_URI},_OKTA_LOGOUT_REDIRECT_URI=${OKTA_LOGOUT_REDIRECT_URI},_IMAGE_TAG=${IMAGE_TAG}"
         '''
       }
     }

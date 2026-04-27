@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -69,6 +70,58 @@ func isAllowedOrigin(origin string, allowedOriginSet map[string]struct{}) bool {
 	return localDevOriginPattern.MatchString(origin)
 }
 
+// ─── GCP Identity Token (Cloud Run service-to-service auth) ──────────────────
+// Cloud Run internal services require a Google-signed identity token even when
+// invoked from within the same VPC. Without it every proxy call returns 403.
+
+type idTokenEntry struct {
+	token  string
+	expiry time.Time
+}
+
+var (
+	idTokenMu    sync.Mutex
+	idTokenStore = make(map[string]idTokenEntry)
+)
+
+// fetchGCPIdentityToken fetches a Google identity token for the given audience
+// from the GCE/Cloud Run metadata server. Returns "" when running locally.
+// Tokens are cached for 45 minutes (Cloud Run tokens last 1 hour).
+func fetchGCPIdentityToken(audience string) string {
+	idTokenMu.Lock()
+	entry, ok := idTokenStore[audience]
+	idTokenMu.Unlock()
+	if ok && time.Now().Before(entry.expiry) {
+		return entry.token
+	}
+
+	metaURL := "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=" +
+		url.QueryEscape(audience) + "&format=full"
+	req, err := http.NewRequest("GET", metaURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("[GW] identity token unavailable for %s (local dev?): %v", audience, err)
+		return ""
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	token := strings.TrimSpace(string(b))
+
+	idTokenMu.Lock()
+	idTokenStore[audience] = idTokenEntry{token: token, expiry: time.Now().Add(45 * time.Minute)}
+	idTokenMu.Unlock()
+	return token
+}
+
 // ─── Rate Limiter ────────────────────────────────────────────────────────────
 
 type IPRateLimiter struct {
@@ -111,8 +164,12 @@ func jwtMiddleware(secret []byte) gin.HandlerFunc {
 	publicPaths := []string{
 		"/api/auth/login",
 		"/api/auth/callback",
+		"/api/auth/session",
 		"/api/auth/dev-login",
+		"/api/auth/auth0-exchange",
 		"/api/auth/refresh",
+		"/api/auth/logout-token",
+		"/api/auth/logout",
 		"/health",
 	}
 
@@ -182,7 +239,34 @@ func newProxy(target string) (*httputil.ReverseProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Audience for the identity token is the scheme+host of the target service.
+	audience := u.Scheme + "://" + u.Host
+
 	proxy := httputil.NewSingleHostReverseProxy(u)
+	defaultDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalHost := req.Host
+		defaultDirector(req)
+
+		// Cloud Run routes requests by Host. Without this, the gateway can proxy
+		// to an internal service URL while still presenting the gateway host,
+		// which loops the request back into the gateway.
+		req.Host = u.Host
+		req.Header.Set("X-Forwarded-Host", originalHost)
+		req.Header.Set("X-Forwarded-Proto", "https")
+
+		// Cloud Run internal services require a Google identity token for
+		// service-to-service authentication (IAM roles/run.invoker).
+		// User JWT is NOT forwarded — user context travels via X-User-* headers
+		// set by the jwtMiddleware → proxyHandler chain above.
+		if token := fetchGCPIdentityToken(audience); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		} else {
+			// Local dev: strip the user JWT so internal services don't try to
+			// validate it as an identity token. User info is in X-User-* headers.
+			req.Header.Del("Authorization")
+		}
+	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		// CORS is enforced at the gateway. Strip upstream CORS headers to avoid
 		// duplicate Access-Control-* values, which browsers treat as CORS errors.
@@ -208,6 +292,7 @@ func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
 		c.Request.Header.Set("X-User-ID", c.GetString("user_id"))
 		c.Request.Header.Set("X-User-Email", c.GetString("email"))
 		c.Request.Header.Set("X-User-Role", c.GetString("role"))
+		c.Request.Header.Del("Origin") // gateway owns CORS; internal services should not reject browser origins
 		c.Request.Header.Del("Cookie") // don't forward cookies to internal services
 
 		// streaming-friendly: disable buffering for AI SSE responses

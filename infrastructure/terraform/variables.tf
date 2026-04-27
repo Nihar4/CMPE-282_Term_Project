@@ -16,36 +16,6 @@ variable "zone" {
   default     = "us-central1-a"
 }
 
-variable "cluster_name" {
-  description = "GKE cluster name"
-  type        = string
-  default     = "enterprise-portal-cluster"
-}
-
-variable "node_count" {
-  description = "Number of nodes per zone in the GKE node pool"
-  type        = number
-  default     = 2
-}
-
-variable "machine_type" {
-  description = "GKE node machine type"
-  type        = string
-  default     = "e2-standard-4"
-}
-
-variable "min_node_count" {
-  description = "Minimum nodes per zone for autoscaling"
-  type        = number
-  default     = 2
-}
-
-variable "max_node_count" {
-  description = "Maximum nodes per zone for autoscaling"
-  type        = number
-  default     = 10
-}
-
 variable "db_tier" {
   description = "Cloud SQL instance tier"
   type        = string
@@ -84,11 +54,41 @@ variable "nvidia_api_key" {
   default     = ""
 }
 
-variable "auth0_client_secret" {
-  description = "Auth0 client secret"
+variable "okta_domain" {
+  description = "Okta tenant domain for optional Okta OIDC login"
+  type        = string
+  default     = "trial-5413467.okta.com"
+}
+
+variable "okta_issuer" {
+  description = "Okta OIDC issuer URL, usually https://<tenant>.okta.com/oauth2/default"
+  type        = string
+  default     = "https://trial-5413467.okta.com/oauth2/default"
+}
+
+variable "okta_client_id" {
+  description = "Okta OIDC client id"
+  type        = string
+  default     = "0oa12cfmwjeBVrl0I698"
+}
+
+variable "okta_client_secret" {
+  description = "Okta OIDC client secret"
   type        = string
   sensitive   = true
   default     = ""
+}
+
+variable "okta_redirect_uri" {
+  description = "Okta callback URL. Okta sends the auth code to this URL — must point to the api-gateway /api/auth/callback endpoint."
+  type        = string
+  default     = "https://api-gateway-ogukkf7z3q-uc.a.run.app/api/auth/callback"
+}
+
+variable "okta_logout_redirect_uri" {
+  description = "Okta post-logout redirect URL — the frontend Cloud Run URL."
+  type        = string
+  default     = "https://frontend-ogukkf7z3q-uc.a.run.app"
 }
 
 variable "gcs_bucket_name" {
@@ -112,7 +112,7 @@ variable "domain_name" {
 variable "allowed_origins" {
   description = "Allowed CORS origins"
   type        = list(string)
-  default     = ["https://portal.yourdomain.com", "http://localhost:3000"]
+  default     = ["https://frontend-ogukkf7z3q-uc.a.run.app", "http://localhost:3000"]
 }
 
 variable "alert_email" {
@@ -124,7 +124,7 @@ variable "alert_email" {
 variable "jenkins_iap_members" {
   description = "IAM members allowed to access Jenkins via IAP tunnel"
   type        = list(string)
-  default     = ["allAuthenticatedUsers"]
+  default     = ["user:niharpatel718@gmail.com"]
 }
 
 variable "github_owner" {
@@ -143,4 +143,34 @@ variable "deploy_serverless" {
   description = "Set false to skip Cloud Run / Functions / Tasks etc. (e.g. on first apply)"
   type        = bool
   default     = true
+}
+
+variable "kafka_brokers" {
+  description = "Comma-separated Kafka bootstrap brokers for Cloud Run services (Confluent Cloud or GCP Managed Service for Apache Kafka)."
+  type        = string
+  default     = "REPLACE_WITH_MANAGED_KAFKA_BOOTSTRAP:9092"
+}
+
+variable "serverless_ai_min_instances" {
+  description = "Minimum warm Cloud Run AI worker instances for Kafka consumption."
+  type        = number
+  default     = 1
+}
+
+variable "image_tag" {
+  description = "Container image tag deployed to Cloud Run."
+  type        = string
+  default     = "latest"
+}
+
+variable "enable_cloud_build_triggers" {
+  description = "Create Cloud Build GitHub triggers (requires manual repository connection first)"
+  type        = bool
+  default     = false
+}
+
+variable "enable_cloud_armor" {
+  description = "Create Cloud Armor policy (requires non-zero SECURITY_POLICIES quota)"
+  type        = bool
+  default     = false
 }
