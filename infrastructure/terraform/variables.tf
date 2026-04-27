@@ -80,9 +80,9 @@ variable "okta_client_secret" {
 }
 
 variable "okta_redirect_uri" {
-  description = "Okta callback URL. Okta sends the auth code to this URL — must point to the api-gateway /api/auth/callback endpoint."
+  description = "Okta callback URL. Okta sends the auth code to the frontend /authorization-code/callback, which bounces to the gateway /api/auth/callback."
   type        = string
-  default     = "https://api-gateway-ogukkf7z3q-uc.a.run.app/api/auth/callback"
+  default     = "https://frontend-ogukkf7z3q-uc.a.run.app/authorization-code/callback"
 }
 
 variable "okta_logout_redirect_uri" {

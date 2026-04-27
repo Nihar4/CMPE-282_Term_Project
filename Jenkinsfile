@@ -17,8 +17,8 @@ pipeline {
     REACT_APP_API_URL = "https://api-gateway-ogukkf7z3q-uc.a.run.app"
     OKTA_ISSUER      = "https://trial-5413467.okta.com/oauth2/default"
     OKTA_CLIENT_ID   = "0oa12cfmwjeBVrl0I698"
-    // Okta sends the auth code back to the gateway, which proxies to auth-service /callback.
-    OKTA_REDIRECT_URI = "https://api-gateway-ogukkf7z3q-uc.a.run.app/api/auth/callback"
+    // Okta sends the auth code to the frontend callback page, which bounces to the gateway.
+    OKTA_REDIRECT_URI = "https://frontend-ogukkf7z3q-uc.a.run.app/authorization-code/callback"
     // After logout Okta redirects back to the frontend.
     OKTA_LOGOUT_REDIRECT_URI = "https://frontend-ogukkf7z3q-uc.a.run.app"
 
